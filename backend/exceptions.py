@@ -4,7 +4,6 @@
 class GeminiServiceError(Exception):
     """Raised when the Gemini API returns an error or is unavailable.
 
-    Attributes:
         status_code: HTTP status code to surface to the caller (default 502).
     """
 

@@ -569,6 +569,48 @@
       aside { display: none; }
       .welcome-cards { grid-template-columns: 1fr; }
     }
+
+    /* ── Onboarding pill options ── */
+    .onboarding-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 2px 0 8px 44px;
+      max-width: 800px;
+      width: 100%;
+      align-self: flex-start;
+    }
+    .onboarding-pills.month-grid {
+      display: grid;
+      grid-template-columns: repeat(4, auto);
+      justify-content: start;
+      gap: 6px;
+    }
+    .onboarding-pill {
+      background: var(--surface2);
+      border: 1.5px solid rgba(240,165,0,0.45);
+      color: var(--accent);
+      padding: 8px 16px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      font-family: inherit;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .onboarding-pill:hover:not(:disabled) {
+      background: rgba(240,165,0,0.15);
+      border-color: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(240,165,0,0.18);
+    }
+    .onboarding-pill.selected {
+      background: rgba(240,165,0,0.22);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .onboarding-pill.faded { opacity: 0.28; cursor: default; }
+    .onboarding-pill:disabled { cursor: default; }
   </style>
 </head>
 <body>
@@ -705,7 +747,7 @@
 </main>
 
 <script>
-  const API_BASE = window.location.origin;
+  const API_BASE = window.location.origin + '/api/v1';
   let messages = [];
   let isStreaming = false;
   let mapReady = false;
@@ -715,6 +757,67 @@
   let activeDestination = null;
   let mapPanelOpen = false;
   let _apiKey = '';
+
+  // ── Onboarding state ──────────────────────────────────────────────────────
+  let sessionState = { groupType: null, month: null, duration: null, budget: null, travelStyle: null };
+  let onboardingStep = 0;
+  let onboardingComplete = false;
+
+  const ONBOARDING_QUESTIONS = [
+    {
+      key: 'groupType',
+      question: 'Are you travelling solo, with a partner, with friends, or with family? 🧳',
+      options: [
+        { label: '🙋 Solo Explorer',   value: 'solo' },
+        { label: '👫 Couple Getaway',  value: 'couple' },
+        { label: '👯 Friends Squad',   value: 'friends' },
+        { label: '👨‍👩‍👧 Family Trip',  value: 'family' },
+      ],
+    },
+    {
+      key: 'month',
+      question: 'Which month are you planning to travel? This helps me find the best weather and avoid peak crowds 🌤️',
+      grid: true,
+      options: [
+        { label: 'Jan', value: 'January' },   { label: 'Feb', value: 'February' },
+        { label: 'Mar', value: 'March' },     { label: 'Apr', value: 'April' },
+        { label: 'May', value: 'May' },       { label: 'Jun', value: 'June' },
+        { label: 'Jul', value: 'July' },      { label: 'Aug', value: 'August' },
+        { label: 'Sep', value: 'September' }, { label: 'Oct', value: 'October' },
+        { label: 'Nov', value: 'November' },  { label: 'Dec', value: 'December' },
+      ],
+    },
+    {
+      key: 'duration',
+      question: 'How many days are you planning? 🗓️',
+      options: [
+        { label: '⚡ Weekend (2-3 days)',    value: '2-3 days' },
+        { label: '🌟 Short Trip (5 days)',   value: '5 days' },
+        { label: '✈️ Full Holiday (7 days)', value: '7 days' },
+        { label: '🌍 Long Escape (10+ days)', value: '10+ days' },
+      ],
+    },
+    {
+      key: 'budget',
+      question: "What's your spending style? Be honest — no judgment! 💰",
+      options: [
+        { label: '🎒 Backpacker  (under ₹15,000)',    value: 'backpacker (under ₹15,000)' },
+        { label: '😊 Comfortable  (₹15,000–₹35,000)', value: 'comfortable (₹15,000–₹35,000)' },
+        { label: '✨ Premium  (₹35,000–₹75,000)',      value: 'premium (₹35,000–₹75,000)' },
+        { label: '👑 Luxury  (₹75,000+)',              value: 'luxury (₹75,000+)' },
+      ],
+    },
+    {
+      key: 'travelStyle',
+      question: 'Last one! What kind of traveller are you? This is how I personalise everything 🎯',
+      options: [
+        { label: '📸 Aesthetic Chaser', value: 'Aesthetic Chaser (cafes, sunsets, Instagram moments)' },
+        { label: '🏔️ Adventure Seeker', value: 'Adventure Seeker (treks, rafting, offbeat)' },
+        { label: '🍜 Food & Culture',   value: 'Food & Culture (local food, history, art)' },
+        { label: '🧘 Rest & Recharge',  value: 'Rest & Recharge (beaches, spas, slow travel)' },
+      ],
+    },
+  ];
 
   function apiHeaders(extra) {
     const h = { 'Content-Type': 'application/json', ...extra };
@@ -986,13 +1089,126 @@
     sendMessage();
   }
 
+  // ── Onboarding functions ──────────────────────────────────────────────────
+  function startOnboarding() {
+    onboardingStep = 0;
+    onboardingComplete = false;
+    sessionState = { groupType: null, month: null, duration: null, budget: null, travelStyle: null };
+    welcomeEl.style.display = 'none';
+    inputEl.disabled = true;
+    inputEl.placeholder = 'Pick an option above to continue…';
+    sendBtn.disabled = true;
+    addMessage('ai', "Hey there! I'm **TripMind** ✈️ Your personal AI travel planner.\n\nI'll ask you **5 quick questions** to craft the perfect trip just for you!");
+    setTimeout(() => showNextOnboardingQuestion(), 900);
+  }
+
+  function addTypingMessage() {
+    welcomeEl.style.display = 'none';
+    const div = document.createElement('div');
+    div.className = 'message ai';
+    div.setAttribute('role', 'article');
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.setAttribute('aria-hidden', 'true');
+    avatar.textContent = '✈️';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = '<div class="typing" role="status" aria-label="TripMind is thinking"><span></span><span></span><span></span></div>';
+    div.appendChild(avatar);
+    div.appendChild(bubble);
+    messagesEl.appendChild(div);
+    scrollToBottom();
+    return div;
+  }
+
+  function showNextOnboardingQuestion() {
+    const typingDiv = addTypingMessage();
+    setTimeout(() => {
+      typingDiv.remove();
+      const q = ONBOARDING_QUESTIONS[onboardingStep];
+      addMessage('ai', q.question);
+      addPillOptions(q, onboardingStep);
+    }, 800);
+  }
+
+  function addPillOptions(question, step) {
+    const container = document.createElement('div');
+    container.className = 'onboarding-pills' + (question.grid ? ' month-grid' : '');
+    container.id = `onboarding-pills-${step}`;
+    container.setAttribute('role', 'group');
+    container.setAttribute('aria-label', `Options for question ${step + 1} of ${ONBOARDING_QUESTIONS.length}`);
+    question.options.forEach(opt => {
+      const btn = document.createElement('button');
+      btn.className = 'onboarding-pill';
+      btn.textContent = opt.label;
+      btn.onclick = () => selectOnboardingOption(step, opt, container);
+      container.appendChild(btn);
+    });
+    messagesEl.appendChild(container);
+    scrollToBottom();
+  }
+
+  function selectOnboardingOption(step, option, container) {
+    const q = ONBOARDING_QUESTIONS[step];
+    sessionState[q.key] = option.value;
+    container.querySelectorAll('.onboarding-pill').forEach(btn => {
+      btn.disabled = true;
+      btn.classList.add(btn.textContent === option.label ? 'selected' : 'faded');
+    });
+    const uDiv = document.createElement('div');
+    uDiv.className = 'message user';
+    uDiv.setAttribute('role', 'article');
+    uDiv.setAttribute('aria-label', 'Your message');
+    const uAvatar = document.createElement('div');
+    uAvatar.className = 'avatar';
+    uAvatar.setAttribute('aria-hidden', 'true');
+    uAvatar.textContent = '👤';
+    const uBubble = document.createElement('div');
+    uBubble.className = 'bubble';
+    uBubble.textContent = option.label;
+    uDiv.appendChild(uAvatar);
+    uDiv.appendChild(uBubble);
+    messagesEl.appendChild(uDiv);
+    scrollToBottom();
+    onboardingStep = step + 1;
+    if (onboardingStep < ONBOARDING_QUESTIONS.length) {
+      setTimeout(() => showNextOnboardingQuestion(), 800);
+    } else {
+      setTimeout(() => completeOnboarding(), 800);
+    }
+  }
+
+  function buildOnboardingPrompt() {
+    return `Here are my travel preferences:\n- Travelling as: ${sessionState.groupType}\n- Travel month: ${sessionState.month}\n- Trip duration: ${sessionState.duration}\n- Budget: ${sessionState.budget}\n- Travel style: ${sessionState.travelStyle}\n\nBased on these, suggest the **3 best destination options** for me with a short reason for each, then create a **complete day-by-day itinerary** for your top recommendation. Include specific hotels, restaurants, activities, and estimated costs in INR.`;
+  }
+
+  async function completeOnboarding() {
+    onboardingComplete = true;
+    inputEl.disabled = false;
+    inputEl.placeholder = 'Where do you want to go? Share your dates, budget, and interests...';
+    const prompt = buildOnboardingPrompt();
+    messages.push({ role: 'user', content: prompt });
+    searchSavedThisConversation = true;
+    saveSearch(`${sessionState.groupType} trip · ${sessionState.month} · ${sessionState.duration}`);
+    isStreaming = true;
+    sendBtn.disabled = true;
+    const aiBubble = addMessage('ai', '', true);
+    const fullText = await _streamToElement(messages, aiBubble);
+    if (fullText) {
+      messages.push({ role: 'assistant', content: fullText });
+      handleAIResponse(fullText);
+    }
+    isStreaming = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+
   function newChat() {
     messages = [];
     currentDestinations = [];
     activeDestination = null;
+    searchSavedThisConversation = false;
     messagesEl.innerHTML = '';
-    messagesEl.appendChild(welcomeEl);
-    welcomeEl.style.display = 'flex';
     inputEl.value = '';
     autoResize(inputEl);
     document.getElementById('destChips').innerHTML = '';
@@ -1001,6 +1217,7 @@
       mapMarkers.forEach(m => m.setMap(null));
       mapMarkers = [];
     }
+    startOnboarding();
   }
 
   function scrollToBottom() {
@@ -1036,9 +1253,53 @@
 
   let searchSavedThisConversation = false;
 
+  async function _streamToElement(apiMessages, bubbleEl) {
+    try {
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: apiHeaders(),
+        body: JSON.stringify({ messages: apiMessages }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+        bubbleEl.innerHTML = `<span style="color:#f85149" role="alert">Error: ${escHtml(err.detail || res.statusText)}</span>`;
+        return null;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let fullText = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') break;
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed.error) {
+              bubbleEl.innerHTML = `<span style="color:#f85149" role="alert">Error: ${escHtml(parsed.error)}</span>`;
+              return fullText || null;
+            }
+            if (parsed.text) {
+              fullText += parsed.text;
+              bubbleEl.innerHTML = DOMPurify.sanitize(marked.parse(fullText));
+              scrollToBottom();
+            }
+          } catch (_) {}
+        }
+      }
+      return fullText;
+    } catch (err) {
+      bubbleEl.innerHTML = `<span style="color:#f85149" role="alert">Connection error. Is the server running?</span>`;
+      return null;
+    }
+  }
+
   async function sendMessage() {
     const text = inputEl.value.trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || !onboardingComplete) return;
 
     isStreaming = true;
     sendBtn.disabled = true;
@@ -1054,54 +1315,10 @@
     }
 
     const aiBubble = addMessage('ai', '', true);
-
-    try {
-      const res = await fetch(`${API_BASE}/chat`, {
-        method: 'POST',
-        headers: apiHeaders(),
-        body: JSON.stringify({ messages }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-        aiBubble.innerHTML = `<span style="color:#f85149" role="alert">Error: ${escHtml(err.detail || res.statusText)}</span>`;
-        isStreaming = false;
-        sendBtn.disabled = false;
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let fullText = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6).trim();
-          if (raw === '[DONE]') break;
-          try {
-            const parsed = JSON.parse(raw);
-            if (parsed.error) {
-              aiBubble.innerHTML = `<span style="color:#f85149" role="alert">Error: ${escHtml(parsed.error)}</span>`;
-              break;
-            }
-            if (parsed.text) {
-              fullText += parsed.text;
-              aiBubble.innerHTML = DOMPurify.sanitize(marked.parse(fullText));
-              scrollToBottom();
-            }
-          } catch (_) {}
-        }
-      }
-
+    const fullText = await _streamToElement(messages, aiBubble);
+    if (fullText) {
       messages.push({ role: 'assistant', content: fullText });
-      if (fullText) handleAIResponse(fullText);
-
-    } catch (err) {
-      aiBubble.innerHTML = `<span style="color:#f85149" role="alert">Connection error. Is the server running?</span>`;
+      handleAIResponse(fullText);
     }
 
     isStreaming = false;
@@ -1112,6 +1329,7 @@
   // ── Init ─────────────────────────────────────────────────────────────────
   initGoogleMaps();
   loadRecentSearches();
+  startOnboarding();
 </script>
 </body>
 </html>
