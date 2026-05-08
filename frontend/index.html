@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Voyager — AI Travel Planner</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <style>
     :root {
       --bg: #0d1117;
@@ -52,7 +53,7 @@
     }
 
     header h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.3px; }
-    header span { font-size: 0.75rem; color: var(--muted); margin-left: 8px; }
+    header .tagline { font-size: 0.75rem; color: var(--muted); margin-left: 8px; }
 
     .model-badge {
       margin-left: auto;
@@ -63,6 +64,23 @@
       padding: 3px 10px;
       border-radius: 20px;
     }
+
+    #mapToggleBtn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 0.78rem;
+      padding: 5px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 8px;
+    }
+    #mapToggleBtn:hover,
+    #mapToggleBtn.active { border-color: var(--accent); color: var(--accent); background: rgba(240,165,0,0.08); }
 
     /* ── Main layout ── */
     main {
@@ -109,6 +127,8 @@
       color: var(--accent);
     }
     .prompt-chip .chip-icon { font-size: 1rem; margin-bottom: 4px; display: block; }
+
+    #recentSearches { display: contents; }
 
     .new-chat-btn {
       margin-top: auto;
@@ -244,7 +264,6 @@
       border-bottom-left-radius: 4px;
     }
 
-    /* Markdown inside bubbles */
     .bubble h1, .bubble h2, .bubble h3 {
       margin: 14px 0 6px;
       font-size: 1rem;
@@ -264,7 +283,6 @@
     }
     .bubble hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 
-    /* Typing indicator */
     .typing { display: flex; gap: 4px; padding: 4px 0; align-items: center; }
     .typing span {
       width: 7px; height: 7px;
@@ -336,7 +354,161 @@
       margin-top: 8px;
     }
 
+    /* ── Map panel ── */
+    .map-panel {
+      width: 340px;
+      border-left: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+      transition: width 0.25s ease, opacity 0.25s ease;
+    }
+    .map-panel.hidden {
+      width: 0;
+      opacity: 0;
+      border-left-width: 0;
+      overflow: hidden;
+    }
+
+    .map-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .map-panel-header span {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .map-panel-header button {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    .map-panel-header button:hover { color: var(--text); background: var(--surface2); }
+
+    #googleMap {
+      width: 100%;
+      height: 240px;
+      flex-shrink: 0;
+      background: var(--surface2);
+    }
+
+    .map-no-key {
+      width: 100%;
+      height: 240px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      color: var(--muted);
+      background: var(--surface2);
+      text-align: center;
+      padding: 16px;
+    }
+
+    /* destination chips on map panel */
+    .dest-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .dest-chip {
+      background: rgba(240,165,0,0.1);
+      border: 1px solid rgba(240,165,0,0.3);
+      color: var(--accent);
+      font-size: 0.72rem;
+      padding: 3px 10px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .dest-chip:hover { background: rgba(240,165,0,0.2); }
+    .dest-chip.active { background: rgba(240,165,0,0.25); font-weight: 600; }
+
+    /* places section */
+    .places-section {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 14px;
+    }
+    .places-section::-webkit-scrollbar { width: 4px; }
+    .places-section::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .places-header {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .place-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 10px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+    }
+    .place-card:hover { border-color: var(--accent); }
+
+    .place-img {
+      width: 100%;
+      height: 110px;
+      object-fit: cover;
+      display: block;
+    }
+
+    .place-info {
+      padding: 10px 12px;
+    }
+    .place-name {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .place-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .place-rating {
+      font-size: 0.75rem;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .place-addr {
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .places-loading {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: center;
+      padding: 20px 0;
+    }
+
     /* Responsive */
+    @media (max-width: 900px) {
+      .map-panel { display: none; }
+      #mapToggleBtn { display: none; }
+    }
     @media (max-width: 640px) {
       aside { display: none; }
       .welcome-cards { grid-template-columns: 1fr; }
@@ -346,69 +518,100 @@
 <body>
 
 <header>
-  <div class="logo">✈️</div>
+  <div class="logo" role="img" aria-label="Voyager logo">✈️</div>
   <h1>Voyager</h1>
-  <span>AI Travel Planner</span>
-  <div class="model-badge">Gemini 2.0 Flash</div>
+  <span class="tagline">AI Travel Planner</span>
+  <div class="model-badge" aria-label="Powered by Gemini 2.5 Flash">Gemini 2.5 Flash</div>
+  <button id="mapToggleBtn" onclick="toggleMapPanel()" aria-label="Toggle map panel" aria-pressed="false">
+    🗺️ Map
+  </button>
 </header>
 
-<main>
-  <aside>
+<main role="main">
+  <aside aria-label="Quick prompts and recent trips">
     <h2>Quick Prompts</h2>
 
-    <div class="prompt-chip" onclick="sendQuick(this.dataset.prompt)" data-prompt="Plan a 10-day trip to Japan in April for two people on a $3,500 budget. We love food, temples, and avoiding tourist traps.">
-      <span class="chip-icon">🗾</span>Japan 10-day foodie trip
+    <div class="prompt-chip" role="button" tabindex="0"
+         onclick="sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         data-prompt="Plan a 10-day trip to Japan in April for two people on a $3,500 budget. We love food, temples, and avoiding tourist traps.">
+      <span class="chip-icon" aria-hidden="true">🗾</span>Japan 10-day foodie trip
     </div>
 
-    <div class="prompt-chip" onclick="sendQuick(this.dataset.prompt)" data-prompt="I have 5 days in Barcelona. I'm a solo traveler who loves architecture, nightlife, and eating at local spots — not touristy restaurants. Budget is around €150/day.">
-      <span class="chip-icon">🇪🇸</span>Barcelona solo adventure
+    <div class="prompt-chip" role="button" tabindex="0"
+         onclick="sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         data-prompt="I have 5 days in Barcelona. I'm a solo traveler who loves architecture, nightlife, and eating at local spots — not touristy restaurants. Budget is around €150/day.">
+      <span class="chip-icon" aria-hidden="true">🇪🇸</span>Barcelona solo adventure
     </div>
 
-    <div class="prompt-chip" onclick="sendQuick(this.dataset.prompt)" data-prompt="Plan a 2-week road trip across New Zealand's South Island in December. We have a campervan and a $4,000 budget for two people.">
-      <span class="chip-icon">🇳🇿</span>NZ South Island road trip
+    <div class="prompt-chip" role="button" tabindex="0"
+         onclick="sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         data-prompt="Plan a 2-week road trip across New Zealand's South Island in December. We have a campervan and a $4,000 budget for two people.">
+      <span class="chip-icon" aria-hidden="true">🇳🇿</span>NZ South Island road trip
     </div>
 
-    <div class="prompt-chip" onclick="sendQuick(this.dataset.prompt)" data-prompt="I want to do a 3-week backpacking trip through Southeast Asia (Thailand, Vietnam, Cambodia) on $40/day. What's the best route and must-do experiences?">
-      <span class="chip-icon">🌏</span>SEA backpacker route
+    <div class="prompt-chip" role="button" tabindex="0"
+         onclick="sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         data-prompt="I want to do a 3-week backpacking trip through Southeast Asia (Thailand, Vietnam, Cambodia) on $40/day. What's the best route and must-do experiences?">
+      <span class="chip-icon" aria-hidden="true">🌏</span>SEA backpacker route
     </div>
 
-    <div class="prompt-chip" onclick="sendQuick(this.dataset.prompt)" data-prompt="Plan a romantic 7-day anniversary trip to Italy for my partner and me. We want Rome, Amalfi Coast, and maybe Positano. Budget is around $5,000 total.">
-      <span class="chip-icon">🇮🇹</span>Italy romance getaway
+    <div class="prompt-chip" role="button" tabindex="0"
+         onclick="sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         data-prompt="Plan a romantic 7-day anniversary trip to Italy for my partner and me. We want Rome, Amalfi Coast, and maybe Positano. Budget is around $5,000 total.">
+      <span class="chip-icon" aria-hidden="true">🇮🇹</span>Italy romance getaway
     </div>
 
-    <div class="prompt-chip" onclick="sendQuick(this.dataset.prompt)" data-prompt="I'm traveling with two young kids (ages 4 and 7) to Costa Rica for 8 days. What's the best family-friendly itinerary with wildlife, beaches, and not too much driving?">
-      <span class="chip-icon">🐊</span>Costa Rica family trip
+    <div class="prompt-chip" role="button" tabindex="0"
+         onclick="sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         data-prompt="I'm traveling with two young kids (ages 4 and 7) to Costa Rica for 8 days. What's the best family-friendly itinerary with wildlife, beaches, and not too much driving?">
+      <span class="chip-icon" aria-hidden="true">🐊</span>Costa Rica family trip
     </div>
+
+    <div id="recentSearches" aria-label="Your recent trips"></div>
 
     <button class="new-chat-btn" onclick="newChat()">+ New Conversation</button>
   </aside>
 
-  <div class="chat-container">
-    <div class="messages" id="messages">
+  <div class="chat-container" role="region" aria-label="Chat">
+    <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Conversation">
       <div class="welcome" id="welcome">
-        <div class="welcome-globe">🌍</div>
+        <div class="welcome-globe" role="img" aria-label="Globe emoji">🌍</div>
         <h2>Where to next?</h2>
         <p>Tell me your dream destination, budget, travel dates, and preferences — I'll craft a personalized itinerary with real recommendations.</p>
-        <div class="welcome-cards">
-          <div class="welcome-card" onclick="sendQuick('Plan a week in Kyoto and Tokyo, Japan for two in cherry blossom season. Budget $4,000.')">
-            <span class="wc-icon">🌸</span>
+        <div class="welcome-cards" role="list">
+          <div class="welcome-card" role="listitem button" tabindex="0"
+               onclick="sendQuick('Plan a week in Kyoto and Tokyo, Japan for two in cherry blossom season. Budget $4,000.')"
+               onkeydown="if(event.key==='Enter')sendQuick('Plan a week in Kyoto and Tokyo, Japan for two in cherry blossom season. Budget $4,000.')">
+            <span class="wc-icon" aria-hidden="true">🌸</span>
             <strong>Japan in Spring</strong>
-            <span>Cherry blossoms & culture</span>
+            <span>Cherry blossoms &amp; culture</span>
           </div>
-          <div class="welcome-card" onclick="sendQuick('Plan a 10-day safari in Kenya and Tanzania on a mid-range budget.')">
-            <span class="wc-icon">🦁</span>
+          <div class="welcome-card" role="listitem button" tabindex="0"
+               onclick="sendQuick('Plan a 10-day safari in Kenya and Tanzania on a mid-range budget.')"
+               onkeydown="if(event.key==='Enter')sendQuick('Plan a 10-day safari in Kenya and Tanzania on a mid-range budget.')">
+            <span class="wc-icon" aria-hidden="true">🦁</span>
             <strong>African Safari</strong>
-            <span>Wildlife & wilderness</span>
+            <span>Wildlife &amp; wilderness</span>
           </div>
-          <div class="welcome-card" onclick="sendQuick('Plan a 2-week Europe trip hitting Paris, Amsterdam, and Prague on $3,000 for one person.')">
-            <span class="wc-icon">🏰</span>
+          <div class="welcome-card" role="listitem button" tabindex="0"
+               onclick="sendQuick('Plan a 2-week Europe trip hitting Paris, Amsterdam, and Prague on $3,000 for one person.')"
+               onkeydown="if(event.key==='Enter')sendQuick('Plan a 2-week Europe trip hitting Paris, Amsterdam, and Prague on $3,000 for one person.')">
+            <span class="wc-icon" aria-hidden="true">🏰</span>
             <strong>European Adventure</strong>
-            <span>Cities, art & history</span>
+            <span>Cities, art &amp; history</span>
           </div>
-          <div class="welcome-card" onclick="sendQuick('Best beaches in Southeast Asia for 3 weeks in November. I want a mix of party, chill, and diving.')">
-            <span class="wc-icon">🏝️</span>
+          <div class="welcome-card" role="listitem button" tabindex="0"
+               onclick="sendQuick('Best beaches in Southeast Asia for 3 weeks in November. I want a mix of party, chill, and diving.')"
+               onkeydown="if(event.key==='Enter')sendQuick('Best beaches in Southeast Asia for 3 weeks in November. I want a mix of party, chill, and diving.')">
+            <span class="wc-icon" aria-hidden="true">🏝️</span>
             <strong>Island Hopping</strong>
-            <span>Sun, sea & diving</span>
+            <span>Sun, sea &amp; diving</span>
           </div>
         </div>
       </div>
@@ -416,17 +619,31 @@
 
     <div class="input-area">
       <div class="input-row">
+        <label for="userInput" class="sr-only" style="position:absolute;left:-9999px">Your message</label>
         <textarea
           id="userInput"
           placeholder="Where do you want to go? Share your dates, budget, and interests..."
           rows="1"
           onkeydown="handleKey(event)"
           oninput="autoResize(this)"
+          aria-label="Your travel question"
+          aria-multiline="true"
         ></textarea>
-        <button id="sendBtn" onclick="sendMessage()" title="Send">➤</button>
+        <button id="sendBtn" onclick="sendMessage()" title="Send message" aria-label="Send message">➤</button>
       </div>
-      <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+      <div class="input-hint" aria-hidden="true">Enter to send · Shift+Enter for new line</div>
     </div>
+  </div>
+
+  <!-- Map Panel -->
+  <div id="mapPanel" class="map-panel hidden" role="complementary" aria-label="Destination map">
+    <div class="map-panel-header">
+      <span>🗺️ Destinations</span>
+      <button onclick="toggleMapPanel()" aria-label="Close map panel">✕</button>
+    </div>
+    <div id="googleMap" aria-label="Interactive map of destinations"></div>
+    <div id="destChips" class="dest-chips" role="list" aria-label="Detected destinations"></div>
+    <div id="placesSection" class="places-section" aria-label="Top attractions"></div>
   </div>
 </main>
 
@@ -434,22 +651,266 @@
   const API_BASE = window.location.origin;
   let messages = [];
   let isStreaming = false;
+  let mapReady = false;
+  let mapInstance = null;
+  let mapMarkers = [];
+  let currentDestinations = [];
+  let activeDestination = null;
+  let mapPanelOpen = false;
 
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('userInput');
   const sendBtn = document.getElementById('sendBtn');
   const welcomeEl = document.getElementById('welcome');
+  const mapPanel = document.getElementById('mapPanel');
+  const mapToggleBtn = document.getElementById('mapToggleBtn');
 
+  // ── Session ID ──────────────────────────────────────────────────────────
+  function getSessionId() {
+    let id = localStorage.getItem('voyager_session');
+    if (!id) {
+      id = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : 'sess_' + Math.random().toString(36).substring(2, 14);
+      localStorage.setItem('voyager_session', id);
+    }
+    return id;
+  }
+
+  // ── Google Maps ─────────────────────────────────────────────────────────
+  async function initGoogleMaps() {
+    try {
+      const cfg = await fetch(`${API_BASE}/config`).then(r => r.json());
+      if (!cfg.maps_api_key) {
+        document.getElementById('googleMap').innerHTML =
+          '<div class="map-no-key">Google Maps API key not configured.<br>Set GOOGLE_MAPS_API_KEY in your environment.</div>';
+        return;
+      }
+      await new Promise((resolve, reject) => {
+        window.__voyagerMapsReady = resolve;
+        const s = document.createElement('script');
+        s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(cfg.maps_api_key)}&callback=__voyagerMapsReady`;
+        s.async = true;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      mapInstance = new google.maps.Map(document.getElementById('googleMap'), {
+        center: { lat: 20, lng: 10 },
+        zoom: 2,
+        mapTypeId: 'roadmap',
+        styles: [
+          { elementType: 'geometry', stylers: [{ color: '#1d2c4d' }] },
+          { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },
+          { elementType: 'labels.text.stroke', stylers: [{ color: '#1a3646' }] },
+          { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e1626' }] },
+          { featureType: 'road', stylers: [{ visibility: 'simplified' }] },
+        ],
+      });
+      mapReady = true;
+      if (currentDestinations.length) updateMapMarkers(currentDestinations);
+    } catch (e) {
+      console.warn('Google Maps failed to load:', e);
+    }
+  }
+
+  async function updateMapMarkers(destinations) {
+    if (!mapReady || !mapInstance) return;
+    mapMarkers.forEach(m => m.setMap(null));
+    mapMarkers = [];
+
+    const geocoder = new google.maps.Geocoder();
+    const bounds = new google.maps.LatLngBounds();
+    const infoWindow = new google.maps.InfoWindow();
+
+    for (const dest of destinations) {
+      await new Promise(resolve => {
+        geocoder.geocode({ address: dest }, (results, status) => {
+          if (status === 'OK' && results[0]) {
+            const marker = new google.maps.Marker({
+              map: mapInstance,
+              position: results[0].geometry.location,
+              title: dest,
+              icon: {
+                path: google.maps.SymbolPath.CIRCLE,
+                scale: 9,
+                fillColor: '#f0a500',
+                fillOpacity: 1,
+                strokeColor: '#000',
+                strokeWeight: 1.5,
+              },
+            });
+            marker.addListener('click', () => {
+              infoWindow.setContent(`<div style="color:#000;font-weight:600;padding:2px 4px">${dest}</div>`);
+              infoWindow.open(mapInstance, marker);
+              selectDestination(dest);
+            });
+            mapMarkers.push(marker);
+            bounds.extend(results[0].geometry.location);
+          }
+          resolve();
+        });
+      });
+    }
+
+    if (mapMarkers.length > 1) {
+      mapInstance.fitBounds(bounds);
+    } else if (mapMarkers.length === 1) {
+      mapInstance.setCenter(mapMarkers[0].getPosition());
+      mapInstance.setZoom(8);
+    }
+  }
+
+  // ── Destination chips ────────────────────────────────────────────────────
+  function renderDestChips(destinations) {
+    const el = document.getElementById('destChips');
+    if (!destinations.length) { el.innerHTML = ''; return; }
+    el.innerHTML = destinations.map(d =>
+      `<div class="dest-chip${d === activeDestination ? ' active' : ''}"
+            role="listitem button" tabindex="0"
+            onclick="selectDestination('${escAttr(d)}')"
+            onkeydown="if(event.key==='Enter')selectDestination('${escAttr(d)}')"
+            aria-label="Show attractions for ${escAttr(d)}">${escHtml(d)}</div>`
+    ).join('');
+  }
+
+  async function selectDestination(dest) {
+    activeDestination = dest;
+    renderDestChips(currentDestinations);
+    await loadPlaces(dest);
+  }
+
+  // ── Google Places ────────────────────────────────────────────────────────
+  async function loadPlaces(destination) {
+    const el = document.getElementById('placesSection');
+    el.innerHTML = `<div class="places-loading">Loading attractions in ${escHtml(destination)}…</div>`;
+    try {
+      const data = await fetch(`${API_BASE}/places-search?q=${encodeURIComponent(destination)}`).then(r => r.json());
+      const places = data.places || [];
+      if (!places.length) {
+        el.innerHTML = `<div class="places-loading">No attractions found for ${escHtml(destination)}</div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div class="places-header">Top attractions · ${escHtml(destination)}</div>
+        ${places.map(p => {
+          const name = p.displayName?.text || 'Unknown place';
+          const addr = p.formattedAddress || '';
+          const rating = p.rating ? `<span class="place-rating" aria-label="Rating ${p.rating}">★ ${p.rating}</span>` : '';
+          const photoRef = p.photos?.[0]?.name;
+          const imgTag = photoRef
+            ? `<img class="place-img" src="${API_BASE}/place-photo?ref=${encodeURIComponent(photoRef)}"
+                   alt="${escAttr(name)}" loading="lazy" onerror="this.remove()" />`
+            : '';
+          return `
+            <article class="place-card">
+              ${imgTag}
+              <div class="place-info">
+                <div class="place-name">${escHtml(name)}</div>
+                <div class="place-meta">${rating}</div>
+                <div class="place-addr">${escHtml(addr)}</div>
+              </div>
+            </article>`;
+        }).join('')}`;
+    } catch (e) {
+      el.innerHTML = `<div class="places-loading">Could not load attractions</div>`;
+    }
+  }
+
+  // ── After AI response: extract destinations and update map ───────────────
+  async function handleAIResponse(text) {
+    try {
+      const res = await fetch(`${API_BASE}/extract-destinations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const { destinations } = await res.json();
+      if (!destinations || !destinations.length) return;
+
+      currentDestinations = destinations;
+      activeDestination = destinations[0];
+      renderDestChips(destinations);
+
+      if (mapReady) updateMapMarkers(destinations);
+      loadPlaces(destinations[0]);
+
+      if (!mapPanelOpen) openMapPanel();
+    } catch (e) {
+      console.warn('Destination extraction failed:', e);
+    }
+  }
+
+  // ── Map panel toggle ─────────────────────────────────────────────────────
+  function toggleMapPanel() {
+    mapPanelOpen ? closeMapPanel() : openMapPanel();
+  }
+
+  function openMapPanel() {
+    mapPanelOpen = true;
+    mapPanel.classList.remove('hidden');
+    mapToggleBtn.classList.add('active');
+    mapToggleBtn.setAttribute('aria-pressed', 'true');
+    if (mapReady && mapInstance) {
+      setTimeout(() => google.maps.event.trigger(mapInstance, 'resize'), 260);
+    }
+  }
+
+  function closeMapPanel() {
+    mapPanelOpen = false;
+    mapPanel.classList.add('hidden');
+    mapToggleBtn.classList.remove('active');
+    mapToggleBtn.setAttribute('aria-pressed', 'false');
+  }
+
+  // ── Firestore: recent searches ───────────────────────────────────────────
+  async function saveSearch(query) {
+    try {
+      await fetch(`${API_BASE}/save-search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, session_id: getSessionId() }),
+      });
+    } catch (e) { /* non-critical */ }
+  }
+
+  async function loadRecentSearches() {
+    try {
+      const data = await fetch(`${API_BASE}/recent-searches?session_id=${getSessionId()}&limit=4`).then(r => r.json());
+      const searches = data.searches || [];
+      const el = document.getElementById('recentSearches');
+      if (!searches.length || !el) return;
+      el.innerHTML = `
+        <h2 style="margin-top:8px">Recent Trips</h2>
+        ${searches.map(s => `
+          <div class="prompt-chip" role="button" tabindex="0"
+               onclick="sendQuick(this.dataset.prompt)"
+               onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+               data-prompt="${escAttr(s.query)}">
+            <span class="chip-icon" aria-hidden="true">🕐</span>${escHtml(truncate(s.query, 55))}
+          </div>`
+        ).join('')}`;
+    } catch (e) { /* non-critical */ }
+  }
+
+  // ── Utilities ────────────────────────────────────────────────────────────
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function escAttr(s) {
+    return String(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+  function truncate(s, n) {
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  // ── Chat UI ──────────────────────────────────────────────────────────────
   function autoResize(el) {
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 140) + 'px';
   }
 
   function handleKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   }
 
   function sendQuick(prompt) {
@@ -460,34 +921,43 @@
 
   function newChat() {
     messages = [];
+    currentDestinations = [];
+    activeDestination = null;
     messagesEl.innerHTML = '';
     messagesEl.appendChild(welcomeEl);
     welcomeEl.style.display = 'flex';
     inputEl.value = '';
     autoResize(inputEl);
+    document.getElementById('destChips').innerHTML = '';
+    document.getElementById('placesSection').innerHTML = '';
+    if (mapReady && mapInstance) {
+      mapMarkers.forEach(m => m.setMap(null));
+      mapMarkers = [];
+    }
   }
 
   function scrollToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
-  function addMessage(role, content, isStreaming = false) {
+  function addMessage(role, content, streaming = false) {
     welcomeEl.style.display = 'none';
-
     const div = document.createElement('div');
     div.className = `message ${role}`;
+    div.setAttribute('role', 'article');
+    div.setAttribute('aria-label', role === 'user' ? 'Your message' : 'AI response');
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
+    avatar.setAttribute('aria-hidden', 'true');
     avatar.textContent = role === 'user' ? '👤' : '✈️';
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-
-    if (isStreaming) {
-      bubble.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+    if (streaming) {
+      bubble.innerHTML = '<div class="typing" aria-label="AI is thinking"><span></span><span></span><span></span></div>';
     } else {
-      bubble.innerHTML = marked.parse(content);
+      bubble.innerHTML = DOMPurify.sanitize(marked.parse(content));
     }
 
     div.appendChild(avatar);
@@ -496,6 +966,8 @@
     scrollToBottom();
     return bubble;
   }
+
+  let searchSavedThisConversation = false;
 
   async function sendMessage() {
     const text = inputEl.value.trim();
@@ -509,6 +981,11 @@
     messages.push({ role: 'user', content: text });
     addMessage('user', text);
 
+    if (!searchSavedThisConversation) {
+      searchSavedThisConversation = true;
+      saveSearch(text);
+    }
+
     const aiBubble = addMessage('ai', '', true);
 
     try {
@@ -520,7 +997,7 @@
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-        aiBubble.innerHTML = `<span style="color:#f85149">Error: ${err.detail || res.statusText}</span>`;
+        aiBubble.innerHTML = `<span style="color:#f85149" role="alert">Error: ${escHtml(err.detail || res.statusText)}</span>`;
         isStreaming = false;
         sendBtn.disabled = false;
         return;
@@ -533,23 +1010,20 @@
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
+        for (const line of chunk.split('\n')) {
           if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') break;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') break;
           try {
-            const parsed = JSON.parse(data);
+            const parsed = JSON.parse(raw);
             if (parsed.error) {
-              aiBubble.innerHTML = `<span style="color:#f85149">Error: ${parsed.error}</span>`;
+              aiBubble.innerHTML = `<span style="color:#f85149" role="alert">Error: ${escHtml(parsed.error)}</span>`;
               break;
             }
             if (parsed.text) {
               fullText += parsed.text;
-              aiBubble.innerHTML = marked.parse(fullText);
+              aiBubble.innerHTML = DOMPurify.sanitize(marked.parse(fullText));
               scrollToBottom();
             }
           } catch (_) {}
@@ -557,15 +1031,20 @@
       }
 
       messages.push({ role: 'assistant', content: fullText });
+      if (fullText) handleAIResponse(fullText);
 
     } catch (err) {
-      aiBubble.innerHTML = `<span style="color:#f85149">Connection error. Is the server running?</span>`;
+      aiBubble.innerHTML = `<span style="color:#f85149" role="alert">Connection error. Is the server running?</span>`;
     }
 
     isStreaming = false;
     sendBtn.disabled = false;
     inputEl.focus();
   }
+
+  // ── Init ─────────────────────────────────────────────────────────────────
+  initGoogleMaps();
+  loadRecentSearches();
 </script>
 </body>
 </html>
