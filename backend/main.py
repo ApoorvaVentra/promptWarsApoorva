@@ -8,19 +8,21 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Optional
 
 import google.generativeai as genai
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+
+from exceptions import GeminiServiceError, RateLimitError, ValidationError
 
 load_dotenv()
 
@@ -44,6 +46,14 @@ except Exception:
 #   --member="serviceAccount:759244730253-compute@developer.gserviceaccount.com" \
 #   --role="roles/secretmanager.secretAccessor"
 def _resolve_secret(name: str) -> str:
+    """Resolve a secret by name from Google Secret Manager with env fallback.
+
+    Args:
+        name: The secret name to look up.
+
+    Returns:
+        The secret value as a plain string, or an empty string if not found.
+    """
     project = os.getenv("GCP_PROJECT", "promptwarsapoorva")
     try:
         from google.cloud import secretmanager
@@ -89,25 +99,25 @@ if not _GEMINI_KEY:
 
 genai.configure(api_key=_GEMINI_KEY)
 
-SYSTEM_PROMPT = """You are an expert travel planner and experience curator with encyclopedic knowledge of destinations worldwide. You help travelers plan extraordinary trips that perfectly balance their preferences, constraints, and budget.
+SYSTEM_PROMPT = """✈️ You are an elite travel planner with encyclopedic knowledge of destinations worldwide — and you LOVE helping people plan unforgettable adventures!
 
-Your capabilities:
-- **Dynamic Itinerary Building**: Create detailed day-by-day plans with timing, transport, and logistics
-- **Budget Optimization**: Suggest options across luxury, mid-range, and budget tiers with real cost estimates in USD
-- **Hidden Gem Curation**: Blend iconic landmarks with local secrets most tourists never find
-- **Constraint Handling**: Adapt plans for dietary restrictions, mobility needs, visa requirements, travel seasons
-- **Cultural Intelligence**: Share etiquette tips, local customs, safety advice, and cultural context
-- **Logistics Mastery**: Recommend specific hotels, airlines, trains, local transit, and booking strategies
+🧠 **What you can do:**
+- 🗓️ Build day-by-day itineraries with timing, transport & logistics
+- 💰 Suggest budget, mid-range & luxury options with real USD cost estimates
+- 💎 Uncover hidden gems most tourists never find
+- ♿ Adapt for dietary needs, mobility, visas & travel seasons
+- 🌍 Share cultural tips, etiquette, safety advice & local context
+- 🏨 Recommend specific hotels, airlines, trains & booking hacks
 
-Response style:
-- Be specific — name actual places, restaurants, hotels, neighborhoods
-- Include practical details: approximate costs, opening hours, booking tips
-- Structure itineraries with Day 1, Day 2 headers and morning/afternoon/evening blocks
-- Use **bold** for key highlights and bullet points for options
-- Proactively flag busy seasons, booking lead times, visa requirements
-- End every response with a question to refine the plan or offer a follow-up
+📋 **Response rules — always follow these:**
+- Use bullet points, not paragraphs — keep it skimmable!
+- Be specific: name real places, restaurants, hotels & neighborhoods
+- Add costs, hours & booking tips inline
+- Structure itineraries as **Day 1 ☀️ Morning / 🌤️ Afternoon / 🌙 Evening**
+- Bold the must-knows; flag ⚠️ busy seasons, visa requirements & booking deadlines
+- End every reply with one sharp follow-up question to dial in the plan
 
-You are enthusiastic, knowledgeable, and genuinely excited to help people create unforgettable travel memories."""
+🚀 Keep responses punchy, exciting & actionable — travelers want to get moving!"""
 
 
 # ── Lazy Gemini model init ───────────────────────────────────────────────────
@@ -118,6 +128,7 @@ _extract_model: Optional[genai.GenerativeModel] = None
 
 
 def _get_chat_model() -> genai.GenerativeModel:
+    """Return the singleton Gemini chat model, initialising it on first call."""
     global _chat_model
     if _chat_model is None:
         _chat_model = genai.GenerativeModel(
@@ -129,6 +140,7 @@ def _get_chat_model() -> genai.GenerativeModel:
 
 
 def _get_extract_model() -> genai.GenerativeModel:
+    """Return the singleton Gemini extraction model, initialising it on first call."""
     global _extract_model
     if _extract_model is None:
         _extract_model = genai.GenerativeModel(model_name="gemini-2.5-flash")
@@ -141,6 +153,14 @@ _redis = None  # set in lifespan
 
 
 async def _cache_get(key: str) -> Optional[str]:
+    """Retrieve a cached value from Redis.
+
+    Args:
+        key: The cache key to look up.
+
+    Returns:
+        The cached value as a string, or None on a miss or error.
+    """
     if not _redis:
         return None
     try:
@@ -151,6 +171,13 @@ async def _cache_get(key: str) -> Optional[str]:
 
 
 async def _cache_set(key: str, value: str, ex: int) -> None:
+    """Write a value to the Redis cache with a TTL.
+
+    Args:
+        key: The cache key.
+        value: The string value to cache.
+        ex: Expiry time in seconds.
+    """
     if not _redis:
         return
     try:
@@ -169,6 +196,14 @@ _MULTI_SPACE_RE = re.compile(r" {2,}")
 
 
 def _minify_html(html: str) -> str:
+    """Strip comments, collapse whitespace, and remove blank lines from HTML.
+
+    Args:
+        html: Raw HTML source.
+
+    Returns:
+        Minified HTML string.
+    """
     html = _COMMENT_RE.sub("", html)
     html = _SPACE_BETWEEN_TAGS_RE.sub("><", html)
     html = _MULTI_SPACE_RE.sub(" ", html)
@@ -179,7 +214,8 @@ def _minify_html(html: str) -> str:
 
 # ── Lifespan (startup / shutdown) ────────────────────────────────────────────
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Configure Redis and optionally minify the frontend HTML at startup."""
     global _redis, _minified_html
 
     # 1. Upstash Redis
@@ -230,15 +266,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ── Global exception handlers ─────────────────────────────────────────────────
+@app.exception_handler(GeminiServiceError)
+async def gemini_exception_handler(request: Request, exc: GeminiServiceError) -> JSONResponse:
+    """Handle Gemini API errors with an appropriate HTTP status code."""
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError) -> JSONResponse:
+    """Handle business-rule validation errors as 422 Unprocessable Entity."""
+    content: dict[str, Any] = {"detail": str(exc)}
+    if exc.field:
+        content["field"] = exc.field
+    return JSONResponse(status_code=422, content=content)
+
+
+@app.exception_handler(RateLimitError)
+async def rate_limit_exception_handler(request: Request, exc: RateLimitError) -> JSONResponse:
+    """Handle explicit rate-limit errors as 429 Too Many Requests."""
+    return JSONResponse(status_code=429, content={"detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all handler to prevent raw tracebacks leaking to clients."""
+    logger.error("Unhandled exception on %s: %s", request.url.path, exc, exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
 # ── Security helpers ─────────────────────────────────────────────────────────
 _TAG_RE = re.compile(r"<[^>]{0,200}>")
 
 
 def _strip_html(text: str) -> str:
+    """Remove all HTML tags from *text*.
+
+    Args:
+        text: Input string potentially containing HTML.
+
+    Returns:
+        Stripped and whitespace-trimmed string.
+    """
     return _TAG_RE.sub("", text).strip()
 
 
 def _mask_ip(host: str | None) -> str:
+    """Obfuscate the last two octets of an IPv4 address for logs.
+
+    Args:
+        host: Raw IP address string, or None.
+
+    Returns:
+        Masked address string, or ``"-"`` if *host* is None.
+    """
     if not host:
         return "-"
     parts = host.split(".")
@@ -247,14 +329,15 @@ def _mask_ip(host: str | None) -> str:
     return host[:6] + "…"
 
 
-_PUBLIC_PATHS = {"/health", "/config", "/favicon.ico"}
+_PUBLIC_PATHS = {"/api/v1/health", "/api/v1/config", "/favicon.ico"}
 _VOYAGER_API_KEY = os.getenv("VOYAGER_API_KEY", "")
 _SLOW_REQUEST_MS = 3_000
 
 
 # ── Combined middleware: request ID + auth + security headers + logging ──────
 @app.middleware("http")
-async def request_middleware(request: Request, call_next):
+async def request_middleware(request: Request, call_next) -> Response:
+    """Attach a request ID, enforce API-key auth, add security headers, and log every request."""
     request_id = uuid.uuid4().hex[:12]
     request.state.request_id = request_id
 
@@ -325,17 +408,40 @@ class TravelStyle(str, Enum):
     local_immersion = "local_immersion"
 
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
+# ── Request schemas ───────────────────────────────────────────────────────────
 class TripContext(BaseModel):
+    """Optional trip preferences to include with a chat message."""
+
     destination: Optional[str] = Field(None, max_length=100)
     budget: Optional[Budget] = None
     mood: Optional[Mood] = None
     travel_style: Optional[TravelStyle] = None
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "destination": "Tokyo",
+                    "budget": "mid_range",
+                    "mood": "culture",
+                    "travel_style": "local_immersion",
+                }
+            ]
+        }
+    )
+
 
 class Message(BaseModel):
+    """A single chat turn."""
+
     role: str
     content: str = Field(..., max_length=20_000)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [{"role": "user", "content": "Plan a 5-day trip to Kyoto for two."}]
+        }
+    )
 
     @field_validator("role")
     @classmethod
@@ -351,12 +457,42 @@ class Message(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    """Payload for the /chat streaming endpoint."""
+
     messages: list[Message] = Field(..., min_length=1, max_length=100)
     context: Optional[TripContext] = None
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "messages": [
+                        {"role": "user", "content": "Plan a 5-day trip to Kyoto for two."}
+                    ],
+                    "context": {
+                        "destination": "Kyoto",
+                        "budget": "mid_range",
+                        "mood": "culture",
+                        "travel_style": "local_immersion",
+                    },
+                }
+            ]
+        }
+    )
+
 
 class ExtractRequest(BaseModel):
+    """Payload for the /extract-destinations endpoint."""
+
     text: str = Field(..., max_length=4_000)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"text": "I'd love to visit Tokyo, then take a day trip to Nikko."}
+            ]
+        }
+    )
 
     @field_validator("text")
     @classmethod
@@ -365,8 +501,18 @@ class ExtractRequest(BaseModel):
 
 
 class SaveSearchRequest(BaseModel):
+    """Payload for persisting a search query to Firestore."""
+
     query: str = Field(..., min_length=1, max_length=500)
     session_id: str = Field(..., max_length=64)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"query": "best street food in Bangkok", "session_id": "user-abc-123"}
+            ]
+        }
+    )
 
     @field_validator("query")
     @classmethod
@@ -381,16 +527,132 @@ class SaveSearchRequest(BaseModel):
         return v
 
 
+# ── Response schemas ──────────────────────────────────────────────────────────
+class DestinationsResponse(BaseModel):
+    """Extracted travel destination names."""
+
+    destinations: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"destinations": ["Tokyo", "Kyoto", "Osaka"]}]}
+    )
+
+
+class SaveSearchResponse(BaseModel):
+    """Result of a search-history save operation."""
+
+    saved: bool
+    reason: Optional[str] = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"saved": True},
+                {"saved": False, "reason": "Firestore not configured"},
+            ]
+        }
+    )
+
+
+class SearchItem(BaseModel):
+    """A single saved search entry."""
+
+    query: str
+    id: str
+
+
+class RecentSearchesResponse(BaseModel):
+    """Recent search history for a session."""
+
+    searches: list[SearchItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"searches": [{"query": "Tokyo itinerary 5 days", "id": "doc123"}]}
+            ]
+        }
+    )
+
+
+class ConfigResponse(BaseModel):
+    """Public client-side configuration values."""
+
+    maps_api_key: str
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"maps_api_key": "AIzaSy..."}]}
+    )
+
+
+class HealthResponse(BaseModel):
+    """Service health and dependency status."""
+
+    status: str
+    model: str
+    firestore: bool
+    cache: bool
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "ok",
+                    "model": "gemini-2.5-flash",
+                    "firestore": True,
+                    "cache": True,
+                }
+            ]
+        }
+    )
+
+
+class PlacesResponse(BaseModel):
+    """Wrapper around the Google Places API search result."""
+
+    places: list[dict[str, Any]] = Field(default_factory=list)
+
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "examples": [
+                {
+                    "places": [
+                        {
+                            "displayName": {"text": "Senso-ji Temple", "languageCode": "en"},
+                            "rating": 4.6,
+                            "formattedAddress": "2-3-1 Asakusa, Taito City, Tokyo",
+                            "types": ["tourist_attraction", "place_of_worship"],
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+
+
 # ── Gemini streaming helper ───────────────────────────────────────────────────
 # The google-generativeai SDK is synchronous. Running it directly inside an
 # async endpoint would block the event loop for the entire response duration.
 # Instead, we push the sync generator into a thread-pool executor and bridge
 # back to the async caller via an asyncio.Queue.
-async def _stream_gemini(history: list, prompt: str) -> AsyncIterator[str]:
+async def _stream_gemini(history: list[dict[str, Any]], prompt: str) -> AsyncIterator[str]:
+    """Yield SSE-formatted chunks from a Gemini streaming chat response.
+
+    Runs the synchronous google-generativeai SDK in a thread-pool executor and
+    bridges the results back to the async caller via an asyncio.Queue.
+
+    Args:
+        history: Prior conversation turns in Gemini format.
+        prompt: The latest user message to send.
+
+    Yields:
+        SSE-encoded strings, ending with ``data: [DONE]``.
+    """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
-    def _run_sync():
+    def _run_sync() -> None:
         try:
             session = _get_chat_model().start_chat(history=history)
             for chunk in session.send_message(prompt, stream=True):
@@ -415,8 +677,17 @@ async def _stream_gemini(history: list, prompt: str) -> AsyncIterator[str]:
 
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
-def _to_gemini_history(messages: list[Message]) -> tuple[list[dict], str]:
-    history = []
+def _to_gemini_history(messages: list[Message]) -> tuple[list[dict[str, Any]], str]:
+    """Convert a list of Messages to a Gemini history list and final prompt.
+
+    Args:
+        messages: All conversation turns, including the latest user turn.
+
+    Returns:
+        A tuple of (history, prompt) where *history* contains all turns except
+        the last one and *prompt* is the text of the final user message.
+    """
+    history: list[dict[str, Any]] = []
     for msg in messages[:-1]:
         role = "user" if msg.role == "user" else "model"
         history.append({"role": role, "parts": [msg.content]})
@@ -424,6 +695,15 @@ def _to_gemini_history(messages: list[Message]) -> tuple[list[dict], str]:
 
 
 def _context_prefix(ctx: Optional[TripContext]) -> str:
+    """Build a structured context preamble to prepend to the user prompt.
+
+    Args:
+        ctx: Optional trip preferences.
+
+    Returns:
+        A formatted string like ``[Trip context: Destination: Tokyo, ...]``,
+        or an empty string if *ctx* is None or has no populated fields.
+    """
     if not ctx:
         return ""
     parts = []
@@ -438,9 +718,22 @@ def _context_prefix(ctx: Optional[TripContext]) -> str:
     return "[Trip context: " + ", ".join(parts) + "]\n\n" if parts else ""
 
 
-@app.post("/chat")
+# ── API Router ────────────────────────────────────────────────────────────────
+router = APIRouter(prefix="/api/v1")
+
+
+@router.post("/chat", response_class=StreamingResponse)
 @limiter.limit("10/minute")
-async def chat(request: Request, body: ChatRequest):
+async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
+    """Stream a Gemini-powered travel planning response as Server-Sent Events.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+        body: Chat history and optional trip context.
+
+    Returns:
+        A ``text/event-stream`` StreamingResponse with SSE-encoded chunks.
+    """
     history, prompt = _to_gemini_history(body.messages)
     if body.context:
         prompt = _context_prefix(body.context) + prompt
@@ -453,11 +746,25 @@ async def chat(request: Request, body: ChatRequest):
 
 
 # ── Extract destinations (cached 30 min) ─────────────────────────────────────
-@app.post("/extract-destinations")
+@router.post("/extract-destinations", response_model=DestinationsResponse)
 @limiter.limit("20/minute")
-async def extract_destinations(request: Request, body: ExtractRequest):
+async def extract_destinations(
+    request: Request, body: ExtractRequest
+) -> JSONResponse | DestinationsResponse:
+    """Extract up to five destination names from free-form travel text.
+
+    Results are cached in Redis for 30 minutes keyed on a SHA-256 digest of
+    the input text.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+        body: Text to analyse.
+
+    Returns:
+        A :class:`DestinationsResponse` containing a list of destination strings.
+    """
     if not body.text.strip():
-        return {"destinations": []}
+        return DestinationsResponse(destinations=[])
 
     cache_key = f"extract:v1:{hashlib.sha256(body.text.encode()).hexdigest()[:20]}"
     cached = await _cache_get(cache_key)
@@ -481,16 +788,33 @@ Text:
         if isinstance(destinations, list):
             payload = {"destinations": [str(d) for d in destinations[:5]]}
             await _cache_set(cache_key, json.dumps(payload), ex=1_800)  # 30 min
-            return payload
+            return DestinationsResponse(**payload)
     except Exception as exc:
         logger.warning("Destination extraction failed: %s", exc)
-    return {"destinations": []}
+    return DestinationsResponse(destinations=[])
 
 
 # ── Google Places (cached 1 hour) ─────────────────────────────────────────────
-@app.get("/places-search")
+@router.get("/places-search", response_model=PlacesResponse)
 @limiter.limit("20/minute")
-async def places_search(request: Request, q: str = Query(..., max_length=100)):
+async def places_search(
+    request: Request, q: str = Query(..., max_length=100)
+) -> JSONResponse | dict[str, Any]:
+    """Search for top tourist attractions near a destination using Google Places.
+
+    Results are cached in Redis for one hour.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+        q: Free-text destination query, e.g. ``"Tokyo"``.
+
+    Returns:
+        The raw Google Places API JSON payload.
+
+    Raises:
+        HTTPException: 503 if the Places API key is not configured, or the
+            upstream status code on a non-200 response.
+    """
     api_key = os.getenv("GOOGLE_PLACES_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="Places API not configured")
@@ -524,9 +848,24 @@ async def places_search(request: Request, q: str = Query(..., max_length=100)):
     return data
 
 
-@app.get("/place-photo")
+@router.get("/place-photo", response_class=Response)
 @limiter.limit("30/minute")
-async def place_photo(request: Request, ref: str = Query(..., max_length=500)):
+async def place_photo(
+    request: Request, ref: str = Query(..., max_length=500)
+) -> Response:
+    """Proxy a Google Places photo by its media reference.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+        ref: The Google Places photo reference path (alphanumeric, hyphens, slashes).
+
+    Returns:
+        The raw photo bytes with the upstream ``content-type`` header.
+
+    Raises:
+        HTTPException: 503 if the Places API key is missing; 400 for an invalid
+            *ref* format.
+    """
     api_key = os.getenv("GOOGLE_PLACES_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="Places API not configured")
@@ -546,30 +885,49 @@ async def place_photo(request: Request, ref: str = Query(..., max_length=500)):
 
 
 # ── Firestore: trip search history ───────────────────────────────────────────
-@app.post("/save-search")
+@router.post("/save-search", response_model=SaveSearchResponse)
 @limiter.limit("20/minute")
-async def save_search(request: Request, body: SaveSearchRequest):
+async def save_search(request: Request, body: SaveSearchRequest) -> SaveSearchResponse:
+    """Persist a search query to Firestore under the given session.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+        body: The query string and session identifier.
+
+    Returns:
+        A :class:`SaveSearchResponse` indicating success or failure.
+    """
     if not _db:
-        return {"saved": False, "reason": "Firestore not configured"}
+        return SaveSearchResponse(saved=False, reason="Firestore not configured")
     try:
         _db.collection("sessions").document(body.session_id).collection("searches").add(
             {"query": body.query, "ts": datetime.now(timezone.utc)}
         )
-        return {"saved": True}
+        return SaveSearchResponse(saved=True)
     except Exception as exc:
         logger.warning("Firestore write failed: %s", exc)
-        return {"saved": False, "reason": str(exc)}
+        return SaveSearchResponse(saved=False, reason=str(exc))
 
 
-@app.get("/recent-searches")
+@router.get("/recent-searches", response_model=RecentSearchesResponse)
 @limiter.limit("30/minute")
 async def recent_searches(
     request: Request,
     session_id: str = Query(..., max_length=64, pattern=r"^[\w\-]{1,64}$"),
     limit: int = Query(5, ge=1, le=20),
-):
+) -> RecentSearchesResponse:
+    """Return the most recent saved searches for a session.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+        session_id: The session identifier (alphanumeric + hyphens, max 64 chars).
+        limit: Maximum number of results to return (1–20, default 5).
+
+    Returns:
+        A :class:`RecentSearchesResponse` with the ordered search list.
+    """
     if not _db:
-        return {"searches": []}
+        return RecentSearchesResponse(searches=[])
     try:
         docs = (
             _db.collection("sessions")
@@ -579,34 +937,270 @@ async def recent_searches(
             .limit(limit)
             .stream()
         )
-        return {"searches": [{"query": d.to_dict()["query"], "id": d.id} for d in docs]}
+        return RecentSearchesResponse(
+            searches=[SearchItem(query=d.to_dict()["query"], id=d.id) for d in docs]
+        )
     except Exception as exc:
         logger.warning("Firestore read failed: %s", exc)
-        return {"searches": []}
+        return RecentSearchesResponse(searches=[])
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-@app.get("/config")
+@router.get("/config", response_model=ConfigResponse)
 @limiter.limit("60/minute")
-async def get_config(request: Request):
-    return {"maps_api_key": os.getenv("GOOGLE_MAPS_API_KEY", "")}
+async def get_config(request: Request) -> ConfigResponse:
+    """Return public client-side configuration values.
+
+    Args:
+        request: The incoming FastAPI request (used by the rate limiter).
+
+    Returns:
+        A :class:`ConfigResponse` with the Google Maps API key.
+    """
+    return ConfigResponse(maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY", ""))
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "model": "gemini-2.5-flash",
-        "firestore": _db is not None,
-        "cache": _redis is not None,
-    }
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    """Return the liveness and dependency status of the service.
+
+    Returns:
+        A :class:`HealthResponse` indicating model name and connectivity.
+    """
+    return HealthResponse(
+        status="ok",
+        model="gemini-2.5-flash",
+        firestore=_db is not None,
+        cache=_redis is not None,
+    )
+
+
+# ── Recommend ────────────────────────────────────────────────────────────────
+class RecommendRequest(BaseModel):
+    destination: str = Field(..., min_length=1, max_length=100)
+    budget: Budget
+    duration_days: Optional[int] = Field(None, ge=1, le=30)
+
+    @field_validator("destination")
+    @classmethod
+    def sanitize_dest(cls, v: str) -> str:
+        return _strip_html(v)
+
+
+@router.post("/recommend")
+@limiter.limit("20/minute")
+async def recommend(request: Request, body: RecommendRequest) -> dict:
+    days = body.duration_days or 7
+    prompt = (
+        f"Plan a {days}-day {body.budget.value} trip to {body.destination}. "
+        "Return ONLY valid JSON with keys: destination (string), highlights (array of 3-5 strings), "
+        "estimated_cost (string like '$1,500-$2,500'), best_time (string), tips (array of 3-5 strings)."
+    )
+    cache_key = f"rec:v1:{hashlib.sha256((body.destination + body.budget.value).encode()).hexdigest()[:20]}"
+    cached = await _cache_get(cache_key)
+    if cached:
+        return JSONResponse(content=json.loads(cached), headers={"X-Cache": "HIT"})
+    try:
+        result = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _get_extract_model().generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"},
+                ),
+            ),
+            timeout=25.0,
+        )
+        data = json.loads(result.text)
+        await _cache_set(cache_key, json.dumps(data), ex=3_600)
+        return data
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="AI service timeout")
+    except Exception as exc:
+        logger.warning("Recommend failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Recommendation failed")
+
+
+# ── Off-season ────────────────────────────────────────────────────────────────
+_MONTH_NAMES = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+@router.get("/offseason/surprise")
+@limiter.limit("20/minute")
+async def offseason_surprise(request: Request) -> dict:
+    import random
+
+    month = random.randint(1, 12)
+    prompt = (
+        f"Surprise me with 3 unusual off-season travel gems for {_MONTH_NAMES[month]}. "
+        "Return ONLY valid JSON with keys: month (int), destinations (array of objects each with: "
+        "name, typical_price, offseason_price, savings_percent (int), why_visit)."
+    )
+    try:
+        result = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _get_extract_model().generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"},
+                ),
+            ),
+            timeout=25.0,
+        )
+        return json.loads(result.text)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="AI service timeout")
+    except Exception as exc:
+        logger.warning("Offseason surprise failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Surprise lookup failed")
+
+
+@router.get("/offseason")
+@limiter.limit("20/minute")
+async def offseason(
+    request: Request,
+    month: int = Query(..., ge=1, le=12),
+    budget: Optional[Budget] = None,
+) -> dict:
+    budget_hint = f" Focus on {budget.value} options." if budget else ""
+    prompt = (
+        f"List 5 off-season travel destinations for {_MONTH_NAMES[month]}.{budget_hint} "
+        "Return ONLY valid JSON with keys: month (int), destinations (array of objects each with: "
+        "name, typical_price, offseason_price, savings_percent (int), why_visit)."
+    )
+    cache_key = f"offseason:v1:{month}:{budget.value if budget else 'any'}"
+    cached = await _cache_get(cache_key)
+    if cached:
+        return JSONResponse(content=json.loads(cached), headers={"X-Cache": "HIT"})
+    try:
+        result = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _get_extract_model().generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"},
+                ),
+            ),
+            timeout=25.0,
+        )
+        data = json.loads(result.text)
+        await _cache_set(cache_key, json.dumps(data), ex=7_200)
+        return data
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="AI service timeout")
+    except Exception as exc:
+        logger.warning("Offseason failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Off-season lookup failed")
+
+
+# ── Inspire ───────────────────────────────────────────────────────────────────
+class InspireRequest(BaseModel):
+    aesthetic: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("aesthetic")
+    @classmethod
+    def sanitize_aesthetic(cls, v: str) -> str:
+        return _strip_html(v)
+
+
+@router.post("/inspire")
+@limiter.limit("20/minute")
+async def inspire(request: Request, body: InspireRequest) -> dict:
+    prompt = (
+        f"Suggest exactly 3 travel destinations that match the '{body.aesthetic}' aesthetic. "
+        "Return ONLY valid JSON with key: destinations (array of exactly 3 objects each with: "
+        "name (string), description (string), hashtags (array of strings prefixed with #), "
+        "photo_spots (array of 2-3 strings))."
+    )
+    cache_key = f"inspire:v1:{hashlib.sha256(body.aesthetic.encode()).hexdigest()[:20]}"
+    cached = await _cache_get(cache_key)
+    if cached:
+        return JSONResponse(content=json.loads(cached), headers={"X-Cache": "HIT"})
+    try:
+        result = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _get_extract_model().generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"},
+                ),
+            ),
+            timeout=25.0,
+        )
+        data = json.loads(result.text)
+        await _cache_set(cache_key, json.dumps(data), ex=3_600)
+        return data
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="AI service timeout")
+    except Exception as exc:
+        logger.warning("Inspire failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Inspiration failed")
+
+
+# ── Caption ───────────────────────────────────────────────────────────────────
+class CaptionRequest(BaseModel):
+    destination: str = Field(..., min_length=1, max_length=100)
+    mood: Mood
+    photo_description: Optional[str] = Field(None, max_length=300)
+
+    @field_validator("destination")
+    @classmethod
+    def sanitize_caption_dest(cls, v: str) -> str:
+        return _strip_html(v)
+
+    @field_validator("photo_description")
+    @classmethod
+    def sanitize_photo(cls, v: Optional[str]) -> Optional[str]:
+        return _strip_html(v) if v else v
+
+
+@router.post("/caption")
+@limiter.limit("20/minute")
+async def caption(request: Request, body: CaptionRequest) -> dict:
+    photo_hint = f" Photo: {body.photo_description}." if body.photo_description else ""
+    prompt = (
+        f"Write a social media travel caption for {body.destination} with a {body.mood.value} vibe.{photo_hint} "
+        "Return ONLY valid JSON with keys: caption (string), hashtags (array of strings prefixed with #), "
+        "alt_captions (array of exactly 2 alternative caption strings)."
+    )
+    try:
+        result = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _get_extract_model().generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"},
+                ),
+            ),
+            timeout=25.0,
+        )
+        return json.loads(result.text)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="AI service timeout")
+    except Exception as exc:
+        logger.warning("Caption failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Caption generation failed")
+
+
+app.include_router(router)
 
 
 # ── Serve index.html (minified in production, raw otherwise) ─────────────────
 # Defined before app.mount so this explicit route takes precedence over StaticFiles.
 @app.get("/", include_in_schema=False)
-async def serve_index():
+async def serve_index() -> Response:
+    """Serve the frontend SPA, using the in-memory minified version in production.
+
+    Returns:
+        The HTML response for the frontend entry point.
+
+    Raises:
+        HTTPException: 404 if the frontend build is not present.
+    """
     if _minified_html:
         return Response(
             content=_minified_html,
