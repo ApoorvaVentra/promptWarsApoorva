@@ -1,16 +1,23 @@
 import json
 import logging
 import os
+import re
+import uuid
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Optional
 
 import google.generativeai as genai
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 load_dotenv()
 
@@ -26,6 +33,33 @@ except Exception:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logger = logging.getLogger("voyager")
     logger.info("Standard logging active (Cloud Logging unavailable)")
+
+
+# ── Google Secret Manager ────────────────────────────────────────────────────
+# To store Gemini key in Secret Manager:
+#   echo -n "YOUR_KEY" | gcloud secrets create GEMINI_API_KEY --data-file=- \
+#     --project=promptwarsapoorva
+#   gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
+#     --member="serviceAccount:759244730253-compute@developer.gserviceaccount.com" \
+#     --role="roles/secretmanager.secretAccessor" --project=promptwarsapoorva
+def _resolve_secret(name: str) -> str:
+    project = os.getenv("GCP_PROJECT", "promptwarsapoorva")
+    try:
+        from google.cloud import secretmanager
+
+        client = secretmanager.SecretManagerServiceClient()
+        resource = f"projects/{project}/secrets/{name}/versions/latest"
+        return (
+            client.access_secret_version(request={"name": resource})
+            .payload.data.decode()
+            .strip()
+        )
+    except Exception as exc:
+        logging.getLogger("voyager").debug(
+            "Secret Manager miss for %s: %s", name, exc
+        )
+        return os.getenv(name, "")
+
 
 # ── Firebase Firestore (graceful fallback) ──────────────────────────────────
 _db = None
@@ -46,8 +80,13 @@ try:
 except Exception as exc:
     logger.warning("Firestore unavailable: %s", exc)
 
-# ── Gemini ──────────────────────────────────────────────────────────────────
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# ── Gemini (key from Secret Manager with env-var fallback) ──────────────────
+_GEMINI_KEY = _resolve_secret("GEMINI_API_KEY")
+if not _GEMINI_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set in Secret Manager or environment")
+
+genai.configure(api_key=_GEMINI_KEY)
 
 SYSTEM_PROMPT = """You are an expert travel planner and experience curator with encyclopedic knowledge of destinations worldwide. You help travelers plan extraordinary trips that perfectly balance their preferences, constraints, and budget.
 
@@ -75,8 +114,13 @@ _chat_model = genai.GenerativeModel(
 )
 _extract_model = genai.GenerativeModel(model_name="gemini-2.5-flash")
 
-# ── App ─────────────────────────────────────────────────────────────────────
+# ── Rate limiter ─────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
+
+# ── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Travel Planning & Experience Engine")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,30 +129,115 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Security helpers ─────────────────────────────────────────────────────────
+_TAG_RE = re.compile(r"<[^>]{0,200}>")  # bounded to prevent ReDoS
 
+
+def _strip_html(text: str) -> str:
+    return _TAG_RE.sub("", text).strip()
+
+
+def _mask_ip(host: str | None) -> str:
+    if not host:
+        return "-"
+    parts = host.split(".")
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.x.x"
+    return host[:6] + "…"
+
+
+_PUBLIC_PATHS = {"/health", "/config", "/favicon.ico"}
+_VOYAGER_API_KEY = os.getenv("VOYAGER_API_KEY", "")
+
+
+# ── Combined middleware: request ID + auth + security headers + logging ──────
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
+async def request_middleware(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+
+    # Auth check — only when VOYAGER_API_KEY is configured
+    if _VOYAGER_API_KEY and request.url.path not in _PUBLIC_PATHS:
+        # Skip auth for static assets (anything with a file extension)
+        is_asset = "." in request.url.path.split("/")[-1]
+        if not is_asset:
+            client_key = request.headers.get("X-API-Key", "")
+            if client_key != _VOYAGER_API_KEY:
+                logger.warning(
+                    json.dumps(
+                        {"event": "auth_fail", "path": request.url.path, "rid": request_id}
+                    )
+                )
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
     start = datetime.now(timezone.utc)
     response = await call_next(request)
     ms = round((datetime.now(timezone.utc) - start).total_seconds() * 1000, 2)
+
+    # Structured log — no PII (IP is masked)
     logger.info(
         json.dumps(
             {
+                "rid": request_id,
                 "method": request.method,
                 "path": request.url.path,
                 "status": response.status_code,
                 "duration_ms": ms,
-                "client": request.client.host if request.client else None,
+                "ip": _mask_ip(request.client.host if request.client else None),
             }
         )
+    )
+
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Request-ID"] = request_id
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com; "
+        "frame-ancestors 'none';"
     )
     return response
 
 
-# ── Models ───────────────────────────────────────────────────────────────────
+# ── Enums ────────────────────────────────────────────────────────────────────
+class Budget(str, Enum):
+    budget = "budget"
+    mid_range = "mid_range"
+    luxury = "luxury"
+
+
+class Mood(str, Enum):
+    adventure = "adventure"
+    relaxation = "relaxation"
+    culture = "culture"
+    food = "food"
+    family = "family"
+    romance = "romance"
+
+
+class TravelStyle(str, Enum):
+    backpacker = "backpacker"
+    comfort = "comfort"
+    luxury = "luxury"
+    local_immersion = "local_immersion"
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+class TripContext(BaseModel):
+    destination: Optional[str] = Field(None, max_length=100)
+    budget: Optional[Budget] = None
+    mood: Optional[Mood] = None
+    travel_style: Optional[TravelStyle] = None
+
+
 class Message(BaseModel):
     role: str
-    content: str
+    content: str = Field(..., max_length=20_000)
 
     @field_validator("role")
     @classmethod
@@ -119,54 +248,42 @@ class Message(BaseModel):
 
     @field_validator("content")
     @classmethod
-    def validate_content(cls, v: str) -> str:
-        if len(v) > 20_000:
-            raise ValueError("message too long")
-        return v
+    def sanitize_content(cls, v: str) -> str:
+        return _strip_html(v)
 
 
 class ChatRequest(BaseModel):
-    messages: list[Message]
-
-    @field_validator("messages")
-    @classmethod
-    def validate_messages(cls, v: list[Message]) -> list[Message]:
-        if not v:
-            raise ValueError("messages must not be empty")
-        if len(v) > 100:
-            raise ValueError("too many messages")
-        return v
+    messages: list[Message] = Field(..., min_length=1, max_length=100)
+    context: Optional[TripContext] = None
 
 
 class ExtractRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=4_000)
 
     @field_validator("text")
     @classmethod
-    def validate_text(cls, v: str) -> str:
-        return v[:4000]
+    def sanitize(cls, v: str) -> str:
+        return _strip_html(v)
 
 
 class SaveSearchRequest(BaseModel):
-    query: str
-    session_id: str
+    query: str = Field(..., min_length=1, max_length=500)
+    session_id: str = Field(..., max_length=64)
 
     @field_validator("query")
     @classmethod
-    def validate_query(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("query must not be empty")
-        return v[:500]
+    def sanitize_query(cls, v: str) -> str:
+        return _strip_html(v)
 
     @field_validator("session_id")
     @classmethod
     def validate_session(cls, v: str) -> str:
-        if len(v) > 64:
-            raise ValueError("session_id too long")
+        if not re.match(r"^[\w\-]{1,64}$", v):
+            raise ValueError("invalid session_id format")
         return v
 
 
-# ── Chat ─────────────────────────────────────────────────────────────────────
+# ── Chat ──────────────────────────────────────────────────────────────────────
 def _to_gemini_history(messages: list[Message]) -> tuple[list[dict], str]:
     history = []
     for msg in messages[:-1]:
@@ -175,12 +292,27 @@ def _to_gemini_history(messages: list[Message]) -> tuple[list[dict], str]:
     return history, messages[-1].content
 
 
-@app.post("/chat")
-async def chat(request: ChatRequest):
-    if not os.getenv("GEMINI_API_KEY"):
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+def _context_prefix(ctx: Optional[TripContext]) -> str:
+    if not ctx:
+        return ""
+    parts = []
+    if ctx.destination:
+        parts.append(f"Destination: {ctx.destination}")
+    if ctx.budget:
+        parts.append(f"Budget tier: {ctx.budget.value}")
+    if ctx.mood:
+        parts.append(f"Trip mood: {ctx.mood.value}")
+    if ctx.travel_style:
+        parts.append(f"Travel style: {ctx.travel_style.value}")
+    return "[Trip context: " + ", ".join(parts) + "]\n\n" if parts else ""
 
-    history, prompt = _to_gemini_history(request.messages)
+
+@app.post("/chat")
+@limiter.limit("10/minute")
+async def chat(request: Request, body: ChatRequest):
+    history, prompt = _to_gemini_history(body.messages)
+    if body.context:
+        prompt = _context_prefix(body.context) + prompt
 
     def generate():
         try:
@@ -201,7 +333,8 @@ async def chat(request: ChatRequest):
 
 # ── Extract destinations ──────────────────────────────────────────────────────
 @app.post("/extract-destinations")
-async def extract_destinations(body: ExtractRequest):
+@limiter.limit("20/minute")
+async def extract_destinations(request: Request, body: ExtractRequest):
     if not body.text.strip():
         return {"destinations": []}
     try:
@@ -224,11 +357,13 @@ Text:
 
 # ── Google Places (New API) ───────────────────────────────────────────────────
 @app.get("/places-search")
-async def places_search(q: str = Query(..., max_length=200)):
+@limiter.limit("20/minute")
+async def places_search(request: Request, q: str = Query(..., max_length=100)):
     api_key = os.getenv("GOOGLE_PLACES_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="Places API not configured")
 
+    clean_q = _strip_html(q)
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             "https://places.googleapis.com/v1/places:searchText",
@@ -238,7 +373,7 @@ async def places_search(q: str = Query(..., max_length=200)):
                 "Content-Type": "application/json",
             },
             json={
-                "textQuery": f"top tourist attractions in {q}",
+                "textQuery": f"top tourist attractions in {clean_q}",
                 "maxResultCount": 3,
                 "languageCode": "en",
             },
@@ -250,10 +385,15 @@ async def places_search(q: str = Query(..., max_length=200)):
 
 
 @app.get("/place-photo")
-async def place_photo(ref: str = Query(..., max_length=500)):
+@limiter.limit("30/minute")
+async def place_photo(request: Request, ref: str = Query(..., max_length=500)):
     api_key = os.getenv("GOOGLE_PLACES_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="Places API not configured")
+
+    # Validate ref only contains safe path characters
+    if not re.match(r"^[\w/\-]+$", ref):
+        raise HTTPException(status_code=400, detail="Invalid photo reference")
 
     url = f"https://places.googleapis.com/v1/{ref}/media?maxHeightPx=300&key={api_key}"
     async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
@@ -267,7 +407,8 @@ async def place_photo(ref: str = Query(..., max_length=500)):
 
 # ── Firestore: trip search history ───────────────────────────────────────────
 @app.post("/save-search")
-async def save_search(body: SaveSearchRequest):
+@limiter.limit("20/minute")
+async def save_search(request: Request, body: SaveSearchRequest):
     if not _db:
         return {"saved": False, "reason": "Firestore not configured"}
     try:
@@ -281,8 +422,11 @@ async def save_search(body: SaveSearchRequest):
 
 
 @app.get("/recent-searches")
+@limiter.limit("30/minute")
 async def recent_searches(
-    session_id: str = Query(..., max_length=64), limit: int = Query(5, ge=1, le=20)
+    request: Request,
+    session_id: str = Query(..., max_length=64, pattern=r"^[\w\-]{1,64}$"),
+    limit: int = Query(5, ge=1, le=20),
 ):
     if not _db:
         return {"searches": []}
@@ -303,8 +447,13 @@ async def recent_searches(
 
 # ── Config (public-safe keys for frontend) ────────────────────────────────────
 @app.get("/config")
-async def get_config():
-    return {"maps_api_key": os.getenv("GOOGLE_MAPS_API_KEY", "")}
+@limiter.limit("60/minute")
+async def get_config(request: Request):
+    return {
+        "maps_api_key": os.getenv("GOOGLE_MAPS_API_KEY", ""),
+        # included so the frontend can authenticate subsequent API calls
+        "api_key": _VOYAGER_API_KEY,
+    }
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

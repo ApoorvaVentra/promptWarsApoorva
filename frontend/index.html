@@ -21,6 +21,35 @@
       --radius: 16px;
     }
 
+    /* ── Skip link ── */
+    .skip-link {
+      position: absolute;
+      left: -9999px;
+      top: 8px;
+      z-index: 9999;
+      background: #4285f4;
+      color: #fff;
+      padding: 8px 18px;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .skip-link:focus { left: 8px; }
+
+    /* ── Visually hidden (accessible label helper) ── */
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
@@ -128,7 +157,7 @@
     }
     .prompt-chip .chip-icon { font-size: 1rem; margin-bottom: 4px; display: block; }
 
-    #recentSearches { display: contents; }
+    #recentSearches { display: flex; flex-direction: column; gap: 8px; }
 
     .new-chat-btn {
       margin-top: auto;
@@ -185,6 +214,14 @@
     @keyframes float {
       0%, 100% { transform: translateY(0); }
       50% { transform: translateY(-10px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .welcome-globe { animation: none; }
+      .typing span { animation: none; opacity: 0.8; }
+      .map-panel { transition: none; }
+      .messages { scroll-behavior: auto; }
+      .prompt-chip, .welcome-card, .place-card,
+      .new-chat-btn, #sendBtn, #mapToggleBtn, .dest-chip { transition: none; }
     }
 
     .welcome h2 {
@@ -297,6 +334,25 @@
       50% { opacity: 1; transform: scale(1.1); }
     }
 
+    /* ── Focus outlines ── */
+    :focus-visible {
+      outline: 2px solid #4285f4;
+      outline-offset: 2px;
+    }
+    /* Input focus is shown on the parent container, not the raw textarea */
+    #userInput:focus { outline: none; }
+    #userInput:focus-visible { outline: none; }
+    .input-row:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(66,133,244,0.35);
+    }
+    .prompt-chip:focus-visible,
+    .welcome-card:focus-visible,
+    .dest-chip:focus-visible {
+      outline: 2px solid #4285f4;
+      outline-offset: 2px;
+    }
+
     /* ── Input area ── */
     .input-area {
       padding: 16px 20px;
@@ -380,7 +436,7 @@
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
-    .map-panel-header span {
+    .map-panel-title {
       font-size: 0.82rem;
       font-weight: 600;
       color: var(--text);
@@ -517,65 +573,67 @@
 </head>
 <body>
 
+<a href="#main-content" class="skip-link">Skip to main content</a>
+
 <header>
   <div class="logo" role="img" aria-label="Voyager logo">✈️</div>
   <h1>Voyager</h1>
   <span class="tagline">AI Travel Planner</span>
   <div class="model-badge" aria-label="Powered by Gemini 2.5 Flash">Gemini 2.5 Flash</div>
-  <button id="mapToggleBtn" onclick="toggleMapPanel()" aria-label="Toggle map panel" aria-pressed="false">
+  <button id="mapToggleBtn" onclick="toggleMapPanel()" aria-label="Toggle destination map" aria-pressed="false" aria-expanded="false">
     🗺️ Map
   </button>
 </header>
 
-<main role="main">
-  <aside aria-label="Quick prompts and recent trips">
-    <h2>Quick Prompts</h2>
+<main id="main-content" tabindex="-1">
+  <aside aria-label="Quick prompts and recent trips" role="navigation">
+    <h2 id="quick-prompts-label">Quick Prompts</h2>
 
     <div class="prompt-chip" role="button" tabindex="0"
          onclick="sendQuick(this.dataset.prompt)"
-         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
          data-prompt="Plan a 10-day trip to Japan in April for two people on a $3,500 budget. We love food, temples, and avoiding tourist traps.">
       <span class="chip-icon" aria-hidden="true">🗾</span>Japan 10-day foodie trip
     </div>
 
     <div class="prompt-chip" role="button" tabindex="0"
          onclick="sendQuick(this.dataset.prompt)"
-         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
          data-prompt="I have 5 days in Barcelona. I'm a solo traveler who loves architecture, nightlife, and eating at local spots — not touristy restaurants. Budget is around €150/day.">
       <span class="chip-icon" aria-hidden="true">🇪🇸</span>Barcelona solo adventure
     </div>
 
     <div class="prompt-chip" role="button" tabindex="0"
          onclick="sendQuick(this.dataset.prompt)"
-         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
          data-prompt="Plan a 2-week road trip across New Zealand's South Island in December. We have a campervan and a $4,000 budget for two people.">
       <span class="chip-icon" aria-hidden="true">🇳🇿</span>NZ South Island road trip
     </div>
 
     <div class="prompt-chip" role="button" tabindex="0"
          onclick="sendQuick(this.dataset.prompt)"
-         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
          data-prompt="I want to do a 3-week backpacking trip through Southeast Asia (Thailand, Vietnam, Cambodia) on $40/day. What's the best route and must-do experiences?">
       <span class="chip-icon" aria-hidden="true">🌏</span>SEA backpacker route
     </div>
 
     <div class="prompt-chip" role="button" tabindex="0"
          onclick="sendQuick(this.dataset.prompt)"
-         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
          data-prompt="Plan a romantic 7-day anniversary trip to Italy for my partner and me. We want Rome, Amalfi Coast, and maybe Positano. Budget is around $5,000 total.">
       <span class="chip-icon" aria-hidden="true">🇮🇹</span>Italy romance getaway
     </div>
 
     <div class="prompt-chip" role="button" tabindex="0"
          onclick="sendQuick(this.dataset.prompt)"
-         onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
          data-prompt="I'm traveling with two young kids (ages 4 and 7) to Costa Rica for 8 days. What's the best family-friendly itinerary with wildlife, beaches, and not too much driving?">
       <span class="chip-icon" aria-hidden="true">🐊</span>Costa Rica family trip
     </div>
 
-    <div id="recentSearches" aria-label="Your recent trips"></div>
+    <div id="recentSearches" aria-live="polite" aria-label="Your recent trips"></div>
 
-    <button class="new-chat-btn" onclick="newChat()">+ New Conversation</button>
+    <button class="new-chat-btn" onclick="newChat()" aria-label="Start a new conversation">+ New Conversation</button>
   </aside>
 
   <div class="chat-container" role="region" aria-label="Chat">
@@ -584,31 +642,31 @@
         <div class="welcome-globe" role="img" aria-label="Globe emoji">🌍</div>
         <h2>Where to next?</h2>
         <p>Tell me your dream destination, budget, travel dates, and preferences — I'll craft a personalized itinerary with real recommendations.</p>
-        <div class="welcome-cards" role="list">
-          <div class="welcome-card" role="listitem button" tabindex="0"
+        <div class="welcome-cards" role="group" aria-label="Suggested trips">
+          <div class="welcome-card" role="button" tabindex="0"
                onclick="sendQuick('Plan a week in Kyoto and Tokyo, Japan for two in cherry blossom season. Budget $4,000.')"
-               onkeydown="if(event.key==='Enter')sendQuick('Plan a week in Kyoto and Tokyo, Japan for two in cherry blossom season. Budget $4,000.')">
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick('Plan a week in Kyoto and Tokyo, Japan for two in cherry blossom season. Budget $4,000.')}">
             <span class="wc-icon" aria-hidden="true">🌸</span>
             <strong>Japan in Spring</strong>
             <span>Cherry blossoms &amp; culture</span>
           </div>
-          <div class="welcome-card" role="listitem button" tabindex="0"
+          <div class="welcome-card" role="button" tabindex="0"
                onclick="sendQuick('Plan a 10-day safari in Kenya and Tanzania on a mid-range budget.')"
-               onkeydown="if(event.key==='Enter')sendQuick('Plan a 10-day safari in Kenya and Tanzania on a mid-range budget.')">
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick('Plan a 10-day safari in Kenya and Tanzania on a mid-range budget.')}">
             <span class="wc-icon" aria-hidden="true">🦁</span>
             <strong>African Safari</strong>
             <span>Wildlife &amp; wilderness</span>
           </div>
-          <div class="welcome-card" role="listitem button" tabindex="0"
+          <div class="welcome-card" role="button" tabindex="0"
                onclick="sendQuick('Plan a 2-week Europe trip hitting Paris, Amsterdam, and Prague on $3,000 for one person.')"
-               onkeydown="if(event.key==='Enter')sendQuick('Plan a 2-week Europe trip hitting Paris, Amsterdam, and Prague on $3,000 for one person.')">
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick('Plan a 2-week Europe trip hitting Paris, Amsterdam, and Prague on $3,000 for one person.')}">
             <span class="wc-icon" aria-hidden="true">🏰</span>
             <strong>European Adventure</strong>
             <span>Cities, art &amp; history</span>
           </div>
-          <div class="welcome-card" role="listitem button" tabindex="0"
+          <div class="welcome-card" role="button" tabindex="0"
                onclick="sendQuick('Best beaches in Southeast Asia for 3 weeks in November. I want a mix of party, chill, and diving.')"
-               onkeydown="if(event.key==='Enter')sendQuick('Best beaches in Southeast Asia for 3 weeks in November. I want a mix of party, chill, and diving.')">
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick('Best beaches in Southeast Asia for 3 weeks in November. I want a mix of party, chill, and diving.')}">
             <span class="wc-icon" aria-hidden="true">🏝️</span>
             <strong>Island Hopping</strong>
             <span>Sun, sea &amp; diving</span>
@@ -618,32 +676,31 @@
     </div>
 
     <div class="input-area">
+      <label for="userInput" class="visually-hidden">Your travel question</label>
       <div class="input-row">
-        <label for="userInput" class="sr-only" style="position:absolute;left:-9999px">Your message</label>
         <textarea
           id="userInput"
           placeholder="Where do you want to go? Share your dates, budget, and interests..."
           rows="1"
           onkeydown="handleKey(event)"
           oninput="autoResize(this)"
-          aria-label="Your travel question"
-          aria-multiline="true"
+          aria-describedby="input-hint"
         ></textarea>
         <button id="sendBtn" onclick="sendMessage()" title="Send message" aria-label="Send message">➤</button>
       </div>
-      <div class="input-hint" aria-hidden="true">Enter to send · Shift+Enter for new line</div>
+      <div id="input-hint" class="input-hint">Enter to send · Shift+Enter for new line</div>
     </div>
   </div>
 
   <!-- Map Panel -->
   <div id="mapPanel" class="map-panel hidden" role="complementary" aria-label="Destination map">
     <div class="map-panel-header">
-      <span>🗺️ Destinations</span>
-      <button onclick="toggleMapPanel()" aria-label="Close map panel">✕</button>
+      <h2 class="map-panel-title" id="map-panel-heading">🗺️ Destinations</h2>
+      <button onclick="toggleMapPanel()" aria-label="Close destination map">✕</button>
     </div>
-    <div id="googleMap" aria-label="Interactive map of destinations"></div>
-    <div id="destChips" class="dest-chips" role="list" aria-label="Detected destinations"></div>
-    <div id="placesSection" class="places-section" aria-label="Top attractions"></div>
+    <div id="googleMap" role="img" aria-label="Interactive map of destinations"></div>
+    <div id="destChips" class="dest-chips" aria-live="polite" aria-label="Detected destinations"></div>
+    <div id="placesSection" class="places-section" aria-live="polite" aria-label="Top attractions"></div>
   </div>
 </main>
 
@@ -657,6 +714,13 @@
   let currentDestinations = [];
   let activeDestination = null;
   let mapPanelOpen = false;
+  let _apiKey = '';
+
+  function apiHeaders(extra) {
+    const h = { 'Content-Type': 'application/json', ...extra };
+    if (_apiKey) h['X-API-Key'] = _apiKey;
+    return h;
+  }
 
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('userInput');
@@ -681,6 +745,7 @@
   async function initGoogleMaps() {
     try {
       const cfg = await fetch(`${API_BASE}/config`).then(r => r.json());
+      if (cfg.api_key) _apiKey = cfg.api_key;
       if (!cfg.maps_api_key) {
         document.getElementById('googleMap').innerHTML =
           '<div class="map-no-key">Google Maps API key not configured.<br>Set GOOGLE_MAPS_API_KEY in your environment.</div>';
@@ -766,9 +831,10 @@
     if (!destinations.length) { el.innerHTML = ''; return; }
     el.innerHTML = destinations.map(d =>
       `<div class="dest-chip${d === activeDestination ? ' active' : ''}"
-            role="listitem button" tabindex="0"
+            role="button" tabindex="0"
+            aria-pressed="${d === activeDestination ? 'true' : 'false'}"
             onclick="selectDestination('${escAttr(d)}')"
-            onkeydown="if(event.key==='Enter')selectDestination('${escAttr(d)}')"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectDestination('${escAttr(d)}')}"
             aria-label="Show attractions for ${escAttr(d)}">${escHtml(d)}</div>`
     ).join('');
   }
@@ -782,12 +848,12 @@
   // ── Google Places ────────────────────────────────────────────────────────
   async function loadPlaces(destination) {
     const el = document.getElementById('placesSection');
-    el.innerHTML = `<div class="places-loading">Loading attractions in ${escHtml(destination)}…</div>`;
+    el.innerHTML = `<div class="places-loading" role="status" aria-live="polite">Loading attractions in ${escHtml(destination)}…</div>`;
     try {
-      const data = await fetch(`${API_BASE}/places-search?q=${encodeURIComponent(destination)}`).then(r => r.json());
+      const data = await fetch(`${API_BASE}/places-search?q=${encodeURIComponent(destination)}`, { headers: apiHeaders({}) }).then(r => r.json());
       const places = data.places || [];
       if (!places.length) {
-        el.innerHTML = `<div class="places-loading">No attractions found for ${escHtml(destination)}</div>`;
+        el.innerHTML = `<div class="places-loading" role="status">No attractions found for ${escHtml(destination)}</div>`;
         return;
       }
       el.innerHTML = `
@@ -812,7 +878,7 @@
             </article>`;
         }).join('')}`;
     } catch (e) {
-      el.innerHTML = `<div class="places-loading">Could not load attractions</div>`;
+      el.innerHTML = `<div class="places-loading" role="alert">Could not load attractions</div>`;
     }
   }
 
@@ -821,7 +887,7 @@
     try {
       const res = await fetch(`${API_BASE}/extract-destinations`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({ text }),
       });
       const { destinations } = await res.json();
@@ -850,6 +916,7 @@
     mapPanel.classList.remove('hidden');
     mapToggleBtn.classList.add('active');
     mapToggleBtn.setAttribute('aria-pressed', 'true');
+    mapToggleBtn.setAttribute('aria-expanded', 'true');
     if (mapReady && mapInstance) {
       setTimeout(() => google.maps.event.trigger(mapInstance, 'resize'), 260);
     }
@@ -860,6 +927,7 @@
     mapPanel.classList.add('hidden');
     mapToggleBtn.classList.remove('active');
     mapToggleBtn.setAttribute('aria-pressed', 'false');
+    mapToggleBtn.setAttribute('aria-expanded', 'false');
   }
 
   // ── Firestore: recent searches ───────────────────────────────────────────
@@ -867,7 +935,7 @@
     try {
       await fetch(`${API_BASE}/save-search`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({ query, session_id: getSessionId() }),
       });
     } catch (e) { /* non-critical */ }
@@ -875,7 +943,7 @@
 
   async function loadRecentSearches() {
     try {
-      const data = await fetch(`${API_BASE}/recent-searches?session_id=${getSessionId()}&limit=4`).then(r => r.json());
+      const data = await fetch(`${API_BASE}/recent-searches?session_id=${getSessionId()}&limit=4`, { headers: apiHeaders({}) }).then(r => r.json());
       const searches = data.searches || [];
       const el = document.getElementById('recentSearches');
       if (!searches.length || !el) return;
@@ -884,7 +952,7 @@
         ${searches.map(s => `
           <div class="prompt-chip" role="button" tabindex="0"
                onclick="sendQuick(this.dataset.prompt)"
-               onkeydown="if(event.key==='Enter')sendQuick(this.dataset.prompt)"
+               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sendQuick(this.dataset.prompt)}"
                data-prompt="${escAttr(s.query)}">
             <span class="chip-icon" aria-hidden="true">🕐</span>${escHtml(truncate(s.query, 55))}
           </div>`
@@ -955,7 +1023,7 @@
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     if (streaming) {
-      bubble.innerHTML = '<div class="typing" aria-label="AI is thinking"><span></span><span></span><span></span></div>';
+      bubble.innerHTML = '<div class="typing" role="status" aria-label="AI is generating a response"><span></span><span></span><span></span></div>';
     } else {
       bubble.innerHTML = DOMPurify.sanitize(marked.parse(content));
     }
@@ -991,7 +1059,7 @@
     try {
       const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({ messages }),
       });
 
