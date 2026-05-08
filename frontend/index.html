@@ -745,7 +745,6 @@
   async function initGoogleMaps() {
     try {
       const cfg = await fetch(`${API_BASE}/config`).then(r => r.json());
-      if (cfg.api_key) _apiKey = cfg.api_key;
       if (!cfg.maps_api_key) {
         document.getElementById('googleMap').innerHTML =
           '<div class="map-no-key">Google Maps API key not configured.<br>Set GOOGLE_MAPS_API_KEY in your environment.</div>';

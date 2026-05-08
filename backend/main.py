@@ -1,11 +1,14 @@
+import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import google.generativeai as genai
 import httpx
@@ -36,12 +39,10 @@ except Exception:
 
 
 # ── Google Secret Manager ────────────────────────────────────────────────────
-# To store Gemini key in Secret Manager:
-#   echo -n "YOUR_KEY" | gcloud secrets create GEMINI_API_KEY --data-file=- \
-#     --project=promptwarsapoorva
-#   gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
-#     --member="serviceAccount:759244730253-compute@developer.gserviceaccount.com" \
-#     --role="roles/secretmanager.secretAccessor" --project=promptwarsapoorva
+# To store key:  echo -n "KEY" | gcloud secrets create GEMINI_API_KEY --data-file=-
+# Grant access:  gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
+#   --member="serviceAccount:759244730253-compute@developer.gserviceaccount.com" \
+#   --role="roles/secretmanager.secretAccessor"
 def _resolve_secret(name: str) -> str:
     project = os.getenv("GCP_PROJECT", "promptwarsapoorva")
     try:
@@ -55,13 +56,13 @@ def _resolve_secret(name: str) -> str:
             .strip()
         )
     except Exception as exc:
-        logging.getLogger("voyager").debug(
-            "Secret Manager miss for %s: %s", name, exc
-        )
+        logging.getLogger("voyager").debug("Secret Manager miss for %s: %s", name, exc)
         return os.getenv(name, "")
 
 
 # ── Firebase Firestore (graceful fallback) ──────────────────────────────────
+# firebase-admin manages an internal gRPC channel pool automatically —
+# the module-level singleton below reuses those connections across requests.
 _db = None
 try:
     import firebase_admin
@@ -76,12 +77,12 @@ try:
         )
         firebase_admin.initialize_app(cred)
     _db = firestore.client()
-    logger.info("Firestore initialized")
+    logger.info("Firestore initialized (connection pool active)")
 except Exception as exc:
     logger.warning("Firestore unavailable: %s", exc)
 
 
-# ── Gemini (key from Secret Manager with env-var fallback) ──────────────────
+# ── Gemini API key ───────────────────────────────────────────────────────────
 _GEMINI_KEY = _resolve_secret("GEMINI_API_KEY")
 if not _GEMINI_KEY:
     raise RuntimeError("GEMINI_API_KEY is not set in Secret Manager or environment")
@@ -108,17 +109,117 @@ Response style:
 
 You are enthusiastic, knowledgeable, and genuinely excited to help people create unforgettable travel memories."""
 
-_chat_model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    system_instruction=SYSTEM_PROMPT,
-)
-_extract_model = genai.GenerativeModel(model_name="gemini-2.5-flash")
+
+# ── Lazy Gemini model init ───────────────────────────────────────────────────
+# Models are created on first use, not at import time, so startup is instant
+# even on cold starts where genai.configure has already run above.
+_chat_model: Optional[genai.GenerativeModel] = None
+_extract_model: Optional[genai.GenerativeModel] = None
+
+
+def _get_chat_model() -> genai.GenerativeModel:
+    global _chat_model
+    if _chat_model is None:
+        _chat_model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=SYSTEM_PROMPT,
+        )
+        logger.info("Gemini chat model initialised (lazy)")
+    return _chat_model
+
+
+def _get_extract_model() -> genai.GenerativeModel:
+    global _extract_model
+    if _extract_model is None:
+        _extract_model = genai.GenerativeModel(model_name="gemini-2.5-flash")
+        logger.info("Gemini extract model initialised (lazy)")
+    return _extract_model
+
+
+# ── Upstash Redis cache (graceful fallback) ──────────────────────────────────
+_redis = None  # set in lifespan
+
+
+async def _cache_get(key: str) -> Optional[str]:
+    if not _redis:
+        return None
+    try:
+        return await _redis.get(key)
+    except Exception as exc:
+        logger.debug("Redis GET failed: %s", exc)
+        return None
+
+
+async def _cache_set(key: str, value: str, ex: int) -> None:
+    if not _redis:
+        return
+    try:
+        await _redis.set(key, value, ex=ex)
+    except Exception as exc:
+        logger.debug("Redis SET failed: %s", exc)
+
+
+# ── HTML minification ────────────────────────────────────────────────────────
+_minified_html: Optional[bytes] = None
+_frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
+_COMMENT_RE = re.compile(r"<!--(?!\[if\s).*?-->", re.DOTALL)
+_SPACE_BETWEEN_TAGS_RE = re.compile(r">\s{2,}<")
+_MULTI_SPACE_RE = re.compile(r" {2,}")
+
+
+def _minify_html(html: str) -> str:
+    html = _COMMENT_RE.sub("", html)
+    html = _SPACE_BETWEEN_TAGS_RE.sub("><", html)
+    html = _MULTI_SPACE_RE.sub(" ", html)
+    # Collapse blank lines while preserving script newlines (single \n only)
+    html = re.sub(r"\n{2,}", "\n", html)
+    return html.strip()
+
+
+# ── Lifespan (startup / shutdown) ────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _redis, _minified_html
+
+    # 1. Upstash Redis
+    url = os.getenv("UPSTASH_REDIS_REST_URL", "")
+    token = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
+    if url and token:
+        try:
+            from upstash_redis.asyncio import Redis as AsyncRedis
+
+            _redis = AsyncRedis(url=url, token=token)
+            # Verify connectivity with a lightweight ping
+            await _redis.ping()
+            logger.info("Upstash Redis connected")
+        except Exception as exc:
+            logger.warning("Redis init failed (caching disabled): %s", exc)
+            _redis = None
+
+    # 2. Minify HTML in production
+    if os.getenv("ENVIRONMENT", "").lower() == "production":
+        html_path = os.path.join(_frontend_path, "index.html")
+        if os.path.exists(html_path):
+            with open(html_path) as f:
+                raw = f.read()
+            minified = _minify_html(raw)
+            _minified_html = minified.encode()
+            logger.info(
+                "HTML minified: %d → %d bytes (%.0f%% reduction)",
+                len(raw.encode()),
+                len(_minified_html),
+                100 * (1 - len(_minified_html) / len(raw.encode())),
+            )
+
+    yield  # app runs here
+
 
 # ── Rate limiter ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
 
 # ── App ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Travel Planning & Experience Engine")
+app = FastAPI(title="Travel Planning & Experience Engine", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -130,7 +231,7 @@ app.add_middleware(
 )
 
 # ── Security helpers ─────────────────────────────────────────────────────────
-_TAG_RE = re.compile(r"<[^>]{0,200}>")  # bounded to prevent ReDoS
+_TAG_RE = re.compile(r"<[^>]{0,200}>")
 
 
 def _strip_html(text: str) -> str:
@@ -148,6 +249,7 @@ def _mask_ip(host: str | None) -> str:
 
 _PUBLIC_PATHS = {"/health", "/config", "/favicon.ico"}
 _VOYAGER_API_KEY = os.getenv("VOYAGER_API_KEY", "")
+_SLOW_REQUEST_MS = 3_000
 
 
 # ── Combined middleware: request ID + auth + security headers + logging ──────
@@ -158,15 +260,11 @@ async def request_middleware(request: Request, call_next):
 
     # Auth check — only when VOYAGER_API_KEY is configured
     if _VOYAGER_API_KEY and request.url.path not in _PUBLIC_PATHS:
-        # Skip auth for static assets (anything with a file extension)
         is_asset = "." in request.url.path.split("/")[-1]
         if not is_asset:
-            client_key = request.headers.get("X-API-Key", "")
-            if client_key != _VOYAGER_API_KEY:
+            if request.headers.get("X-API-Key", "") != _VOYAGER_API_KEY:
                 logger.warning(
-                    json.dumps(
-                        {"event": "auth_fail", "path": request.url.path, "rid": request_id}
-                    )
+                    json.dumps({"event": "auth_fail", "path": request.url.path, "rid": request_id})
                 )
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
@@ -174,21 +272,21 @@ async def request_middleware(request: Request, call_next):
     response = await call_next(request)
     ms = round((datetime.now(timezone.utc) - start).total_seconds() * 1000, 2)
 
-    # Structured log — no PII (IP is masked)
-    logger.info(
-        json.dumps(
-            {
-                "rid": request_id,
-                "method": request.method,
-                "path": request.url.path,
-                "status": response.status_code,
-                "duration_ms": ms,
-                "ip": _mask_ip(request.client.host if request.client else None),
-            }
-        )
-    )
+    log_entry = {
+        "rid": request_id,
+        "method": request.method,
+        "path": request.url.path,
+        "status": response.status_code,
+        "duration_ms": ms,
+        "ip": _mask_ip(request.client.host if request.client else None),
+        "cache": response.headers.get("X-Cache", "MISS"),
+    }
+    if ms > _SLOW_REQUEST_MS:
+        log_entry["slow"] = True
+        logger.warning(json.dumps(log_entry))
+    else:
+        logger.info(json.dumps(log_entry))
 
-    # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -283,6 +381,39 @@ class SaveSearchRequest(BaseModel):
         return v
 
 
+# ── Gemini streaming helper ───────────────────────────────────────────────────
+# The google-generativeai SDK is synchronous. Running it directly inside an
+# async endpoint would block the event loop for the entire response duration.
+# Instead, we push the sync generator into a thread-pool executor and bridge
+# back to the async caller via an asyncio.Queue.
+async def _stream_gemini(history: list, prompt: str) -> AsyncIterator[str]:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _run_sync():
+        try:
+            session = _get_chat_model().start_chat(history=history)
+            for chunk in session.send_message(prompt, stream=True):
+                if chunk.text:
+                    loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, {"__error__": str(exc)})
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+    loop.run_in_executor(None, _run_sync)
+
+    while True:
+        item = await queue.get()
+        if item is None:
+            yield "data: [DONE]\n\n"
+            return
+        if isinstance(item, dict):
+            yield f"data: {json.dumps({'error': item['__error__']})}\n\n"
+            return
+        yield f"data: {json.dumps({'text': item})}\n\n"
+
+
 # ── Chat ──────────────────────────────────────────────────────────────────────
 def _to_gemini_history(messages: list[Message]) -> tuple[list[dict], str]:
     history = []
@@ -314,48 +445,49 @@ async def chat(request: Request, body: ChatRequest):
     if body.context:
         prompt = _context_prefix(body.context) + prompt
 
-    def generate():
-        try:
-            session = _chat_model.start_chat(history=history)
-            for chunk in session.send_message(prompt, stream=True):
-                if chunk.text:
-                    yield f"data: {json.dumps({'text': chunk.text})}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-
     return StreamingResponse(
-        generate(),
+        _stream_gemini(history, prompt),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-# ── Extract destinations ──────────────────────────────────────────────────────
+# ── Extract destinations (cached 30 min) ─────────────────────────────────────
 @app.post("/extract-destinations")
 @limiter.limit("20/minute")
 async def extract_destinations(request: Request, body: ExtractRequest):
     if not body.text.strip():
         return {"destinations": []}
+
+    cache_key = f"extract:v1:{hashlib.sha256(body.text.encode()).hexdigest()[:20]}"
+    cached = await _cache_get(cache_key)
+    if cached:
+        return JSONResponse(content=json.loads(cached), headers={"X-Cache": "HIT"})
+
     try:
-        result = _extract_model.generate_content(
-            f"""Extract the specific city or country destination names mentioned in this travel planning text.
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _get_extract_model().generate_content(
+                f"""Extract the specific city or country destination names mentioned in this travel planning text.
 Return ONLY a valid JSON array of strings (max 5 destinations), no explanation.
 Example: ["Tokyo", "Kyoto", "Osaka"]
 
 Text:
 {body.text}""",
-            generation_config={"response_mime_type": "application/json"},
+                generation_config={"response_mime_type": "application/json"},
+            ),
         )
         destinations = json.loads(result.text)
         if isinstance(destinations, list):
-            return {"destinations": [str(d) for d in destinations[:5]]}
+            payload = {"destinations": [str(d) for d in destinations[:5]]}
+            await _cache_set(cache_key, json.dumps(payload), ex=1_800)  # 30 min
+            return payload
     except Exception as exc:
         logger.warning("Destination extraction failed: %s", exc)
     return {"destinations": []}
 
 
-# ── Google Places (New API) ───────────────────────────────────────────────────
+# ── Google Places (cached 1 hour) ─────────────────────────────────────────────
 @app.get("/places-search")
 @limiter.limit("20/minute")
 async def places_search(request: Request, q: str = Query(..., max_length=100)):
@@ -363,7 +495,12 @@ async def places_search(request: Request, q: str = Query(..., max_length=100)):
     if not api_key:
         raise HTTPException(status_code=503, detail="Places API not configured")
 
-    clean_q = _strip_html(q)
+    clean_q = _strip_html(q).lower().strip()
+    cache_key = f"places:v1:{clean_q}"
+    cached = await _cache_get(cache_key)
+    if cached:
+        return JSONResponse(content=json.loads(cached), headers={"X-Cache": "HIT"})
+
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             "https://places.googleapis.com/v1/places:searchText",
@@ -381,7 +518,10 @@ async def places_search(request: Request, q: str = Query(..., max_length=100)):
 
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail="Places API error")
-    return resp.json()
+
+    data = resp.json()
+    await _cache_set(cache_key, json.dumps(data), ex=3_600)  # 1 hour
+    return data
 
 
 @app.get("/place-photo")
@@ -391,7 +531,6 @@ async def place_photo(request: Request, ref: str = Query(..., max_length=500)):
     if not api_key:
         raise HTTPException(status_code=503, detail="Places API not configured")
 
-    # Validate ref only contains safe path characters
     if not re.match(r"^[\w/\-]+$", ref):
         raise HTTPException(status_code=400, detail="Invalid photo reference")
 
@@ -402,6 +541,7 @@ async def place_photo(request: Request, ref: str = Query(..., max_length=500)):
     return Response(
         content=resp.content,
         media_type=resp.headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "public, max-age=86400"},  # photos are stable
     )
 
 
@@ -445,15 +585,11 @@ async def recent_searches(
         return {"searches": []}
 
 
-# ── Config (public-safe keys for frontend) ────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 @app.get("/config")
 @limiter.limit("60/minute")
 async def get_config(request: Request):
-    return {
-        "maps_api_key": os.getenv("GOOGLE_MAPS_API_KEY", ""),
-        # included so the frontend can authenticate subsequent API calls
-        "api_key": _VOYAGER_API_KEY,
-    }
+    return {"maps_api_key": os.getenv("GOOGLE_MAPS_API_KEY", "")}
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -463,10 +599,27 @@ async def health():
         "status": "ok",
         "model": "gemini-2.5-flash",
         "firestore": _db is not None,
+        "cache": _redis is not None,
     }
 
 
-# ── Static frontend (mount last) ──────────────────────────────────────────────
-_frontend = os.path.join(os.path.dirname(__file__), "..", "frontend")
-if os.path.exists(_frontend):
-    app.mount("/", StaticFiles(directory=_frontend, html=True), name="frontend")
+# ── Serve index.html (minified in production, raw otherwise) ─────────────────
+# Defined before app.mount so this explicit route takes precedence over StaticFiles.
+@app.get("/", include_in_schema=False)
+async def serve_index():
+    if _minified_html:
+        return Response(
+            content=_minified_html,
+            media_type="text/html",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+    html_path = os.path.join(_frontend_path, "index.html")
+    if os.path.exists(html_path):
+        with open(html_path, "rb") as f:
+            return Response(content=f.read(), media_type="text/html")
+    raise HTTPException(status_code=404)
+
+
+# ── Static assets (mount last — explicit routes above take priority) ──────────
+if os.path.exists(_frontend_path):
+    app.mount("/", StaticFiles(directory=_frontend_path, html=True), name="frontend")
